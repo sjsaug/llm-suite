@@ -42,58 +42,36 @@ st.markdown("""
         text-align: center;
         margin-bottom: 30px;
     }
-    /* Tooltip container */
-    .tooltip {
-        position: relative;
-        display: inline-block;
-        cursor: help;
-        margin-top: 0px;
-        color: #0068c9;
-        font-size: 0.9rem;
-    }
-    /* Tooltip text */
-    .tooltip .tooltiptext {
-        visibility: hidden;
-        width: 90%;
-        background-color: #f0f2f6;
-        color: #333;
-        text-align: left;
-        padding: 10px;
-        border-radius: 6px;
-        border: 1px solid #ddd;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        
-        /* Position the tooltip */
-        position: absolute;
-        z-index: 1;
-        top: 125%;
-        left: 0;
-    }
-    /* Show the tooltip text when you mouse over the tooltip container */
-    .tooltip:hover .tooltiptext {
-        visibility: visible;
-    }
-    /* Fix checkbox alignment */
-    .model-label {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-    }
-    .model-label input {
-        margin: 0;
-    }
-    /* Bold select all text */
-    .select-all-bold {
-        font-weight: bold;
-    }
-    /* Blue button styling */
+    /* Blue styling for UI elements */
     .stButton>button {
-        border-color: #0068c9;
-        color: #0068c9;
+        border-color: #0068c9 !important;
+        color: #0068c9 !important;
     }
-    .stButton>button[data-baseweb="button"] {
-        border-color: #0068c9;
+    
+    /* Style for checkboxes */
+    [data-testid="stCheckbox"] svg {
+        fill: #0068c9 !important;
     }
+    
+    /* Style for sliders */
+    [data-testid="stThumbValue"] {
+        color: #0068c9 !important;
+    }
+    
+    .stSlider [aria-valuemax] {
+        background-color: rgba(0, 104, 201, 0.2) !important;
+    }
+    
+    .stSlider [aria-valuenow] {
+        background-color: #0068c9 !important;
+    }
+    
+    /* Blue hover effects */
+    .stButton>button:hover {
+        border-color: #044a8f !important;
+        background-color: #e6f0ff !important;
+    }
+    
     /* Hide Streamlit menu */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
@@ -143,26 +121,6 @@ def get_available_models():
     except Exception as e:
         st.error(f"Error connecting to Ollama: {e}")
         return [], []
-
-# Function to create HTML tooltip for model details
-def create_model_tooltip(model_info):
-    tooltip_content = f"""
-    <b>Base Model:</b> {model_info['base_name']}<br>
-    <b>Version:</b> {model_info['version']}<br>
-    <b>Size:</b> {model_info['size_mb']} MB<br>
-    """
-    
-    # Add additional details if available
-    if "family" in model_info:
-        tooltip_content += f"<b>Family:</b> {model_info['family']}<br>"
-    if "parameter_size" in model_info:
-        tooltip_content += f"<b>Parameter Size:</b> {model_info['parameter_size']}<br>"
-    if "quantization_level" in model_info:
-        tooltip_content += f"<b>Quantization:</b> {model_info['quantization_level']}<br>"
-    if "format" in model_info:
-        tooltip_content += f"<b>Format:</b> {model_info['format']}<br>"
-    
-    return tooltip_content
 
 # non-streaming inference function
 def query_model(model_name: str, prompt: str, system_prompt: Optional[str] = None, temperature: float = 0.7) -> str:
@@ -281,56 +239,96 @@ with st.sidebar:
             models_by_family[base_name] = []
         models_by_family[base_name].append(model["name"])
     
-    # select all - with bold text
-    if st.checkbox("", key="select_all"):
-        st.markdown('<span class="select-all-bold">Select All Models</span>', unsafe_allow_html=True)
+    # select all - with button and label side by side (using label parameter instead of columns)
+    select_all = st.checkbox("Select All Models", key="select_all", value=False)
+    
+    # If select all is checked, select all models
+    if select_all:
         selected_models = [model["name"] for model in models_info]
-    else:
-        st.markdown('<span class="select-all-bold">Select All Models</span>', unsafe_allow_html=True)
-        
-        # Handle each model family - always use expanders
-        for base_name, versions in models_by_family.items():
-            if len(versions) == 1:
-                # Even for single model, use an expander
-                with st.expander(f"{base_name} (1 version)", expanded=True):
-                    model_name = versions[0]
-                    model_info = model_info_by_name[model_name]
-                    tooltip_content = create_model_tooltip(model_info)
+    
+    # Handle each model family - always use expanders
+    for base_name, versions in models_by_family.items():
+        if len(versions) == 1:
+            # Even for single model, use an expander
+            with st.expander(f"{base_name} (1 version)", expanded=True):
+                model_name = versions[0]
+                model_info = model_info_by_name[model_name]
+                
+                # Create help tooltip with model details
+                help_text = f"""
+                Base Model: {model_info['base_name']}
+                Version: {model_info['version']} 
+                Size: {model_info['size_mb']} MB
+                """
+                
+                # Add additional details if available
+                if "family" in model_info:
+                    help_text += f"\nFamily: {model_info['family']}"
+                if "parameter_size" in model_info:
+                    help_text += f"\nParameter Size: {model_info['parameter_size']}"
+                if "quantization_level" in model_info:
+                    help_text += f"\nQuantization: {model_info['quantization_level']}"
+                if "format" in model_info:
+                    help_text += f"\nFormat: {model_info['format']}"
+                
+                # Combine checkbox and help in one line
+                if st.checkbox(f"{model_name}", key=f"model_{model_name}", help=help_text):
+                    selected_models.append(model_name)
+        else:
+            # For multiple versions, use expander
+            with st.expander(f"{base_name} ({len(versions)} versions)", expanded=True):
+                # select all versions of this model
+                family_models_selected = []
+                
+                # Use label parameter for "Select all family versions" instead of columns
+                select_all_family = st.checkbox(f"Select all {base_name} versions", key=f"select_all_{base_name}")
+                
+                # create columns for checkboxes to make better use of space
+                cols = st.columns(2)
+                for i, version in enumerate(versions):
+                    col_idx = i % 2
+                    model_info = model_info_by_name[version]
                     
-                    # Use columns for displaying model and details
-                    col1, col2 = st.columns([4, 1])
-                    with col1:
-                        if st.checkbox(model_name, key=f"model_{model_name}"):
-                            selected_models.append(model_name)
-                    with col2:
-                        # Add tooltip that attaches to model name
-                        st.markdown(f"""<div class="tooltip">ℹ️
-                        <span class="tooltiptext">{tooltip_content}</span>
-                        </div>""", unsafe_allow_html=True)
-            else:
-                # For multiple versions, use expander
-                with st.expander(f"{base_name} ({len(versions)} versions)", expanded=True):
-                    # select all versions of this model
-                    if st.checkbox(f"Select all {base_name} versions", key=f"select_all_{base_name}"):
-                        for version in versions:
-                            selected_models.append(version)
+                    # Create help text for tooltip
+                    help_text = f"""
+                    Base Model: {model_info['base_name']}
+                    Version: {model_info['version']} 
+                    Size: {model_info['size_mb']} MB
+                    """
                     
-                    # create columns for checkboxes to make better use of space
-                    cols = st.columns(2)
-                    for i, version in enumerate(versions):
-                        col_idx = i % 2
-                        model_info = model_info_by_name[version]
-                        tooltip_content = create_model_tooltip(model_info)
-                        
-                        with cols[col_idx]:
-                            # Create a checkbox with label
-                            if st.checkbox(version, key=f"model_{version}"):
+                    # Add additional details if available
+                    if "family" in model_info:
+                        help_text += f"\nFamily: {model_info['family']}"
+                    if "parameter_size" in model_info:
+                        help_text += f"\nParameter Size: {model_info['parameter_size']}"
+                    if "quantization_level" in model_info:
+                        help_text += f"\nQuantization: {model_info['quantization_level']}"
+                    if "format" in model_info:
+                        help_text += f"\nFormat: {model_info['format']}"
+                    
+                    with cols[col_idx]:
+                        # Fixed checkbox behavior to respect family select all
+                        is_checked = select_all_family or version in selected_models
+                        # Use horizontal layout with inline help text
+                        model_selection = st.checkbox(
+                            f"{version}", 
+                            key=f"model_{version}", 
+                            value=is_checked,
+                            help=help_text
+                        )
+                        if model_selection:
+                            if version not in selected_models:
                                 selected_models.append(version)
-                            
-                            # Add a small tooltip icon with details
-                            st.markdown(f"""<div class="tooltip">ℹ️
-                            <span class="tooltiptext">{tooltip_content}</span>
-                            </div>""", unsafe_allow_html=True)
+                            family_models_selected.append(version)
+                        elif version in selected_models:
+                            selected_models.remove(version)
+                
+                # Update selected models based on family selection
+                if select_all_family:
+                    # Add all family models to selected_models if not already there
+                    for version in versions:
+                        if version not in selected_models:
+                            selected_models.append(version)
     
     # selected models count
     if selected_models:
@@ -381,6 +379,10 @@ if clear_button:
     st.session_state.current_streaming_text = ""
     st.rerun()
 
+# MOVED: Progress container and bar ABOVE streaming section
+progress_container = st.empty()
+progress_bar = st.empty()
+
 # Section for live streaming display
 streaming_section = st.empty()
 
@@ -393,9 +395,7 @@ if compare_button:
         st.session_state.debug_info.append(f"Starting comparison with {len(selected_models)} models")
         
         with st.spinner("Generating responses..."):
-            # progress bar and status text container (combined)
-            progress_container = st.empty()
-            progress_bar = st.progress(0)
+            # Using previously defined progress containers
             
             # Set up streaming if enabled
             streaming_display = None
@@ -409,6 +409,7 @@ if compare_button:
                     if enable_streaming:
                         # Combined progress text and length counter on same line
                         progress_container.markdown(f"**Model {i+1}/{len(selected_models)}:** {model} | Response length: 0 characters")
+                        progress_bar.progress((i) / len(selected_models))
                         
                         # Reset streaming display for next model
                         st.session_state.current_streaming_text = ""
@@ -425,6 +426,7 @@ if compare_button:
                     else:
                         # Only show "Processing" message when not streaming
                         progress_container.markdown(f"**Generating {i+1}/{len(selected_models)}:** {model}")
+                        progress_bar.progress((i) / len(selected_models))
                         st.session_state.debug_info.append(f"Processing model {i+1}/{len(selected_models)}: {model}")
                         response = query_model(model, user_prompt, system_prompt, temperature)
                     
@@ -441,9 +443,9 @@ if compare_button:
             if streaming_display:
                 streaming_display.empty()
             
-            with st.expander("Debug Information", expanded=False):
-                for line in st.session_state.debug_info:
-                    st.text(line)
+            # Fixed debug information expander
+            with st.expander("Debug Information"):
+                st.code("\n".join(st.session_state.debug_info))
 
 # display results
 if st.session_state.results:

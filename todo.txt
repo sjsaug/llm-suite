@@ -1,7 +1,5 @@
-- 'Select All Models' formatted under button -> format to beside button
-- fix Details popup (completely broken, will have to try using builtin streamlit functionality)
-- Display generating responses only when streaming unchecked
-- Move entire progress section above streamed response
-- Elements (checkboxes, sliders, button hover, etc.) from red -> blue
-- 'Select All' in a given model family leaves models in that family unchecked, allowing for duplicates
-- Debug Information dropdown broken -> disappears when opened
+- 'Select All Models' selects all models but does not display checkbox selections after the first family dropdown. This allows for duplicates, if an unchecked checkbox is checked. To keep it simple, if select all models is checked, the dropdowns should disappear.
+- Edge case: when one model is selected, should be 'selected 1 model' not 'selected one models'
+- Edge case: when 'select all x versions' is checked, where x is the model, all models in that family are checked BUT if one or more are unchecked, 'select all x verisions' is not unchecked (it should be)
+- Display 'Generating responses...' only when streaming is unchecked
+- Elements (checkboxes, sliders) from red -> blue
