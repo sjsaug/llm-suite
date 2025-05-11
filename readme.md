@@ -1,6 +1,6 @@
-# Inference Comparator
+# LLM Suite
 
-Inference Comparator allows you compare responses of various local LLMs.
+LLM Suite allows you compare responses of various local LLMs.
 
 ## Features
 

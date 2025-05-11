@@ -7,7 +7,7 @@ import html
 
 # st page config
 st.set_page_config(
-    page_title="Inference Comparator",
+    page_title="LLM Suite",
     page_icon="🦙",
     layout="wide",
     menu_items={
@@ -79,7 +79,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown("<h1 class='title'>Inference Comparator</h1>", unsafe_allow_html=True)
+st.markdown("<h1 class='title'>LLM Suite</h1>", unsafe_allow_html=True)
 
 # get list of available models with details (https://github.com/ollama/ollama-python/blob/main/examples/list.py)
 @st.cache_data(ttl=300)  # cache for 5 mins
