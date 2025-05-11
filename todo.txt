@@ -1,3 +1,11 @@
 - Edge case: when 'select all x versions' is checked, where x is the model, all models in that family are checked BUT if one or more are unchecked, 'select all x verisions' is not unchecked (it should be): trying to do so results in the following (when tested on the deepseek-r1 family): streamlit.errors.StreamlitAPIException: st.session_state.select_all_deepseek-r1 cannot be modified after the widget with key select_all_deepseek-r1 is instantiated
 - 'In progress...' should not display when 'Enable streaming' is checked, only when it is unchecked
 - Elements (checkboxes, sliders) from red -> blue
+- Add a button to stop inference -> skips to final results page
+
+ADVANCED:
+- For models that have thought processes, like deepseek-r1, add checkbox parameter to include thought processes in final response or not (parse them out if not - will require some troubleshooting)
+- Add an 'evaluation model' that looks over all of the responses and judges which response is the most recurring - useful for STEM questions
+- Model management (download, remove, custom gguf models?), list of recommended models for hardware spec? (could be based off of available system VRAM -> all models under x billion parameters. ie. 8GB VRAM -> all models under 8B parameters -> fetch list matching constraints from available ollama models)
+- Model benchmarks: provide tokens/sec & other metrics
+- Config/profile support (w/ configparser?) for model selections, parameters, system prompt, etc. & option to set default config & load on startup. will require lots of edge case checks (ie. if model is selected in config but not downloaded - prompt to download or to remove from config?) 
