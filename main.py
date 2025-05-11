@@ -242,54 +242,19 @@ with st.sidebar:
     # select all - with button and label side by side (using label parameter instead of columns)
     select_all = st.checkbox("Select All Models", key="select_all", value=False)
     
-    # If select all is checked, select all models
+    # If select all is checked, select all models and hide individual model selections
     if select_all:
         selected_models = [model["name"] for model in models_info]
-    
-    # Handle each model family - always use expanders
-    for base_name, versions in models_by_family.items():
-        if len(versions) == 1:
-            # Even for single model, use an expander
-            with st.expander(f"{base_name} (1 version)", expanded=True):
-                model_name = versions[0]
-                model_info = model_info_by_name[model_name]
-                
-                # Create help tooltip with model details
-                help_text = f"""
-                Base Model: {model_info['base_name']}
-                Version: {model_info['version']} 
-                Size: {model_info['size_mb']} MB
-                """
-                
-                # Add additional details if available
-                if "family" in model_info:
-                    help_text += f"\nFamily: {model_info['family']}"
-                if "parameter_size" in model_info:
-                    help_text += f"\nParameter Size: {model_info['parameter_size']}"
-                if "quantization_level" in model_info:
-                    help_text += f"\nQuantization: {model_info['quantization_level']}"
-                if "format" in model_info:
-                    help_text += f"\nFormat: {model_info['format']}"
-                
-                # Combine checkbox and help in one line
-                if st.checkbox(f"{model_name}", key=f"model_{model_name}", help=help_text):
-                    selected_models.append(model_name)
-        else:
-            # For multiple versions, use expander
-            with st.expander(f"{base_name} ({len(versions)} versions)", expanded=True):
-                # select all versions of this model
-                family_models_selected = []
-                
-                # Use label parameter for "Select all family versions" instead of columns
-                select_all_family = st.checkbox(f"Select all {base_name} versions", key=f"select_all_{base_name}")
-                
-                # create columns for checkboxes to make better use of space
-                cols = st.columns(2)
-                for i, version in enumerate(versions):
-                    col_idx = i % 2
-                    model_info = model_info_by_name[version]
+    else:
+        # Handle each model family - always use expanders
+        for base_name, versions in models_by_family.items():
+            if len(versions) == 1:
+                # Even for single model, use an expander
+                with st.expander(f"{base_name} (1 version)", expanded=True):
+                    model_name = versions[0]
+                    model_info = model_info_by_name[model_name]
                     
-                    # Create help text for tooltip
+                    # Create help tooltip with model details
                     help_text = f"""
                     Base Model: {model_info['base_name']}
                     Version: {model_info['version']} 
@@ -306,33 +271,93 @@ with st.sidebar:
                     if "format" in model_info:
                         help_text += f"\nFormat: {model_info['format']}"
                     
-                    with cols[col_idx]:
-                        # Fixed checkbox behavior to respect family select all
-                        is_checked = select_all_family or version in selected_models
-                        # Use horizontal layout with inline help text
-                        model_selection = st.checkbox(
-                            f"{version}", 
-                            key=f"model_{version}", 
-                            value=is_checked,
-                            help=help_text
-                        )
-                        if model_selection:
+                    # Combine checkbox and help in one line
+                    if st.checkbox(f"{model_name}", key=f"model_{model_name}", help=help_text):
+                        selected_models.append(model_name)
+            else:
+                # For multiple versions, use expander
+                with st.expander(f"{base_name} ({len(versions)} versions)", expanded=True):
+                    # select all versions of this model
+                    family_models = [version for version in versions]
+                    family_models_selected = [version for version in versions if version in selected_models]
+                    
+                    # Check if all models in this family are selected
+                    all_family_selected = all(version in selected_models for version in versions)
+                    
+                    # Use label parameter for "Select all family versions" instead of columns
+                    select_all_family = st.checkbox(
+                        f"Select all {base_name} versions", 
+                        key=f"select_all_{base_name}",
+                        value=all_family_selected
+                    )
+                    
+                    # Handle selecting/deselecting all versions in this family
+                    if select_all_family:
+                        # Add all versions to selected_models
+                        for version in versions:
                             if version not in selected_models:
                                 selected_models.append(version)
-                            family_models_selected.append(version)
-                        elif version in selected_models:
-                            selected_models.remove(version)
-                
-                # Update selected models based on family selection
-                if select_all_family:
-                    # Add all family models to selected_models if not already there
-                    for version in versions:
-                        if version not in selected_models:
-                            selected_models.append(version)
+                        family_models_selected = family_models.copy()
+                    
+                    # create columns for checkboxes to make better use of space
+                    cols = st.columns(2)
+                    for i, version in enumerate(versions):
+                        col_idx = i % 2
+                        model_info = model_info_by_name[version]
+                        
+                        # Create help text for tooltip
+                        help_text = f"""
+                        Base Model: {model_info['base_name']}
+                        Version: {model_info['version']} 
+                        Size: {model_info['size_mb']} MB
+                        """
+                        
+                        # Add additional details if available
+                        if "family" in model_info:
+                            help_text += f"\nFamily: {model_info['family']}"
+                        if "parameter_size" in model_info:
+                            help_text += f"\nParameter Size: {model_info['parameter_size']}"
+                        if "quantization_level" in model_info:
+                            help_text += f"\nQuantization: {model_info['quantization_level']}"
+                        if "format" in model_info:
+                            help_text += f"\nFormat: {model_info['format']}"
+                        
+                        with cols[col_idx]:
+                            # Check if this model should be checked based on select_all_family
+                            is_checked = select_all_family or version in selected_models
+                            
+                            # Use checkbox for model selection
+                            model_selection = st.checkbox(
+                                f"{version}", 
+                                key=f"model_{version}", 
+                                value=is_checked,
+                                help=help_text
+                            )
+                            
+                            # Update selected_models based on checkbox
+                            if model_selection and version not in selected_models:
+                                selected_models.append(version)
+                            elif not model_selection and version in selected_models:
+                                selected_models.remove(version)
+                            
+                            # Update family_models_selected for tracking
+                            if model_selection and version not in family_models_selected:
+                                family_models_selected.append(version)
+                            elif not model_selection and version in family_models_selected:
+                                family_models_selected.remove(version)
+                    
+                    # Update select_all_family if individual models are deselected
+                    if len(family_models_selected) != len(family_models) and select_all_family:
+                        # This is a workaround - can't directly modify checkbox state
+                        # But we can update the session state for the next rerun
+                        st.session_state[f"select_all_{base_name}"] = False
     
-    # selected models count
+    # selected models count with proper grammar
     if selected_models:
-        st.info(f"Selected {len(selected_models)} models: {', '.join(selected_models)}")
+        if len(selected_models) == 1:
+            st.info(f"Selected 1 model: {selected_models[0]}")
+        else:
+            st.info(f"Selected {len(selected_models)} models: {', '.join(selected_models)}")
     else:
         st.info("No models selected")
     
@@ -394,7 +419,7 @@ if compare_button:
         st.session_state.debug_info = []
         st.session_state.debug_info.append(f"Starting comparison with {len(selected_models)} models")
         
-        with st.spinner("Generating responses..."):
+        with st.spinner():  # Remove the "Generating responses..." text that appears when streaming is disabled
             # Using previously defined progress containers
             
             # Set up streaming if enabled
@@ -424,7 +449,7 @@ if compare_button:
                             streaming_display
                         )
                     else:
-                        # Only show "Processing" message when not streaming
+                        # Show processing message when not streaming
                         progress_container.markdown(f"**Generating {i+1}/{len(selected_models)}:** {model}")
                         progress_bar.progress((i) / len(selected_models))
                         st.session_state.debug_info.append(f"Processing model {i+1}/{len(selected_models)}: {model}")
