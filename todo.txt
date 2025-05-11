@@ -1,11 +1,7 @@
-- 'Select All Models' bold font
-- fix Details popup (fit details in side column)
-- generating responses only when streaming unchecked
-- move refresh available models and found x models accross y model families to bottom
-- 'current response length' -> 'response length'. also move to same line as current model x. also reset when switch to next model in line
-- remove 'All x responses generated successfully'
-- download options beside each other
-- compare models & button outlines -> blue
-- remove default streamlit 'Deploy' & settings icon
-- models in dropdowns (even if sole model from that family - in such case, 1 version, no select all x versions checkbox)
-- model dropdowns open by default
+- 'Select All Models' formatted under button -> format to beside button
+- fix Details popup (completely broken, will have to try using builtin streamlit functionality)
+- Display generating responses only when streaming unchecked
+- Move entire progress section above streamed response
+- Elements (checkboxes, sliders, button hover, etc.) from red -> blue
+- 'Select All' in a given model family leaves models in that family unchecked, allowing for duplicates
+- Debug Information dropdown broken -> disappears when opened

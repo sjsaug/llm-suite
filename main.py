@@ -9,7 +9,12 @@ import html
 st.set_page_config(
     page_title="Inference Comparator",
     page_icon="🦙",
-    layout="wide"
+    layout="wide",
+    menu_items={
+        'Get Help': None,
+        'Report a bug': None,
+        'About': None
+    }
 )
 
 if 'results' not in st.session_state:
@@ -49,7 +54,7 @@ st.markdown("""
     /* Tooltip text */
     .tooltip .tooltiptext {
         visibility: hidden;
-        width: 300px;
+        width: 90%;
         background-color: #f0f2f6;
         color: #333;
         text-align: left;
@@ -77,6 +82,22 @@ st.markdown("""
     .model-label input {
         margin: 0;
     }
+    /* Bold select all text */
+    .select-all-bold {
+        font-weight: bold;
+    }
+    /* Blue button styling */
+    .stButton>button {
+        border-color: #0068c9;
+        color: #0068c9;
+    }
+    .stButton>button[data-baseweb="button"] {
+        border-color: #0068c9;
+    }
+    /* Hide Streamlit menu */
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -212,10 +233,6 @@ def query_model_streaming(model_name: str, prompt: str, system_prompt: Optional[
         # Initialize response text
         full_response = ""
         
-        # Update the header to show which model is currently streaming
-        if progress_text:
-            progress_text.text(f"Streaming from: {model_name}")
-        
         # Stream the response
         for chunk in ollama.generate(**params):
             if chunk and 'response' in chunk:
@@ -228,9 +245,9 @@ def query_model_streaming(model_name: str, prompt: str, system_prompt: Optional[
                     streaming_display.markdown(f"<div class='model-response'>{full_response}</div>", 
                                                unsafe_allow_html=True)
                 
-                # Update the length counter
-                if response_length:
-                    response_length.text(f"Current response length: {len(full_response)} characters")
+                # Update the combined progress text and length counter
+                if progress_text:
+                    progress_text.markdown(f"**Model:** {model_name} | Response length: {len(full_response)} characters")
         
         st.session_state.debug_info.append(f"Completed streaming from {model_name}, final length: {len(full_response)}")
         return full_response
@@ -243,20 +260,15 @@ def query_model_streaming(model_name: str, prompt: str, system_prompt: Optional[
 with st.sidebar:
     st.header("Settings")
     
-    if st.button("Refresh Available Models"):
-        st.cache_data.clear()
-        st.rerun()
+    # model selection
+    st.subheader("Select Models to Compare")
+    selected_models = []
     
+    # get models
     base_model_names, models_info = get_available_models()
     
     if not models_info:
         st.warning("No models found. Make sure Ollama is running.")
-    else:
-        st.success(f"Found {len(models_info)} models across {len(base_model_names)} model families")
-        
-    # model selection
-    st.subheader("Select Models to Compare")
-    selected_models = []
     
     # group models by base model name
     models_by_family = {}
@@ -269,52 +281,56 @@ with st.sidebar:
             models_by_family[base_name] = []
         models_by_family[base_name].append(model["name"])
     
-    # select all
-    if st.checkbox("Select All Models", key="select_all"):
+    # select all - with bold text
+    if st.checkbox("", key="select_all"):
+        st.markdown('<span class="select-all-bold">Select All Models</span>', unsafe_allow_html=True)
         selected_models = [model["name"] for model in models_info]
     else:
-        # Handle each model family
+        st.markdown('<span class="select-all-bold">Select All Models</span>', unsafe_allow_html=True)
+        
+        # Handle each model family - always use expanders
         for base_name, versions in models_by_family.items():
             if len(versions) == 1:
-                # For single model, show a checkbox with tooltip on the model name
-                model_name = versions[0]
-                model_info = model_info_by_name[model_name]
-                tooltip_content = create_model_tooltip(model_info)
-                
-                # Use columns for displaying models side by side
-                col1, col2 = st.columns([4, 1])
-                with col1:
-                    if st.checkbox(model_name, key=f"model_{model_name}"):
-                        selected_models.append(model_name)
-                with col2:
-                    # Add tooltip that attaches to model name
-                    st.markdown(f"""<div class="tooltip">ℹ️ Details
-                    <span class="tooltiptext">{tooltip_content}</span>
-                    </div>""", unsafe_allow_html=True)
+                # Even for single model, use an expander
+                with st.expander(f"{base_name} (1 version)", expanded=True):
+                    model_name = versions[0]
+                    model_info = model_info_by_name[model_name]
+                    tooltip_content = create_model_tooltip(model_info)
+                    
+                    # Use columns for displaying model and details
+                    col1, col2 = st.columns([4, 1])
+                    with col1:
+                        if st.checkbox(model_name, key=f"model_{model_name}"):
+                            selected_models.append(model_name)
+                    with col2:
+                        # Add tooltip that attaches to model name
+                        st.markdown(f"""<div class="tooltip">ℹ️
+                        <span class="tooltiptext">{tooltip_content}</span>
+                        </div>""", unsafe_allow_html=True)
             else:
                 # For multiple versions, use expander
-                with st.expander(f"{base_name} ({len(versions)} versions)"):
+                with st.expander(f"{base_name} ({len(versions)} versions)", expanded=True):
                     # select all versions of this model
                     if st.checkbox(f"Select all {base_name} versions", key=f"select_all_{base_name}"):
                         for version in versions:
                             selected_models.append(version)
-                    else:
-                        # create columns for checkboxes to make better use of space
-                        cols = st.columns(2)
-                        for i, version in enumerate(versions):
-                            col_idx = i % 2
-                            model_info = model_info_by_name[version]
-                            tooltip_content = create_model_tooltip(model_info)
+                    
+                    # create columns for checkboxes to make better use of space
+                    cols = st.columns(2)
+                    for i, version in enumerate(versions):
+                        col_idx = i % 2
+                        model_info = model_info_by_name[version]
+                        tooltip_content = create_model_tooltip(model_info)
+                        
+                        with cols[col_idx]:
+                            # Create a checkbox with label
+                            if st.checkbox(version, key=f"model_{version}"):
+                                selected_models.append(version)
                             
-                            with cols[col_idx]:
-                                # Create a checkbox with label
-                                if st.checkbox(version, key=f"model_{version}"):
-                                    selected_models.append(version)
-                                
-                                # Add a small tooltip icon with details
-                                st.markdown(f"""<div class="tooltip">ℹ️ Details
-                                <span class="tooltiptext">{tooltip_content}</span>
-                                </div>""", unsafe_allow_html=True)
+                            # Add a small tooltip icon with details
+                            st.markdown(f"""<div class="tooltip">ℹ️
+                            <span class="tooltiptext">{tooltip_content}</span>
+                            </div>""", unsafe_allow_html=True)
     
     # selected models count
     if selected_models:
@@ -335,6 +351,16 @@ with st.sidebar:
     st.subheader("System Prompt (Optional)")
     system_prompt = st.text_area("Enter a system prompt", 
                                "")
+    
+    # Move refresh models button and model count to bottom
+    st.subheader("Model Management")
+    
+    if st.button("Refresh Available Models"):
+        st.cache_data.clear()
+        st.rerun()
+        
+    if models_info:
+        st.success(f"Found {len(models_info)} models across {len(base_model_names)} model families")
 
 st.header("Enter Your Prompt")
 user_prompt = st.text_area("The same prompt will be sent to all selected models", 
@@ -342,7 +368,7 @@ user_prompt = st.text_area("The same prompt will be sent to all selected models"
 
 col1, col2 = st.columns([1, 1])
 with col1:
-    compare_button = st.button("Compare Models", type="primary", use_container_width=True)
+    compare_button = st.button("Compare Models", use_container_width=True)
 with col2:
     clear_button = st.button("Clear Results", type="secondary", use_container_width=True)
 
@@ -367,44 +393,43 @@ if compare_button:
         st.session_state.debug_info.append(f"Starting comparison with {len(selected_models)} models")
         
         with st.spinner("Generating responses..."):
-            # progress bar and status text
-            progress_text = st.empty()
+            # progress bar and status text container (combined)
+            progress_container = st.empty()
             progress_bar = st.progress(0)
             
-            # response length counter (only visible when streaming)
-            response_length = st.empty() if enable_streaming else None
-            
-            # Streaming display container
-            streaming_display = streaming_section.empty() if enable_streaming else None
-            
-            # Determine which query function to use
-            query_func = query_model_streaming if enable_streaming else query_model
+            # Set up streaming if enabled
+            streaming_display = None
+            if enable_streaming:
+                # Create container for streaming display
+                streaming_display = streaming_section.empty()
             
             # process each model one at a time (IMPORTANT)
             for i, model in enumerate(selected_models):
                 try:
                     if enable_streaming:
-                        progress_text.text(f"Processing {i+1}/{total}: {model}" if not enable_streaming else f"Streaming from: {model}")
+                        # Combined progress text and length counter on same line
+                        progress_container.markdown(f"**Model {i+1}/{len(selected_models)}:** {model} | Response length: 0 characters")
+                        
+                        # Reset streaming display for next model
+                        st.session_state.current_streaming_text = ""
+                        
                         response = query_model_streaming(
                             model, 
                             user_prompt, 
                             system_prompt, 
                             temperature, 
-                            progress_text,
-                            response_length,
+                            progress_container,  # Pass the container for updates
+                            progress_container,  # Use same container for length updates
                             streaming_display
                         )
                     else:
-                        progress_text.text(f"Processing {i+1}/{len(selected_models)}: {model}")
+                        # Only show "Processing" message when not streaming
+                        progress_container.markdown(f"**Generating {i+1}/{len(selected_models)}:** {model}")
                         st.session_state.debug_info.append(f"Processing model {i+1}/{len(selected_models)}: {model}")
                         response = query_model(model, user_prompt, system_prompt, temperature)
                     
                     st.session_state.results[model] = response
                     progress_bar.progress((i + 1) / len(selected_models))
-                    
-                    # Display the length of the current model's response (only if not streaming)
-                    if not enable_streaming and response_length:
-                        response_length.text(f"Current response length: {len(response)} characters")
                     
                 except Exception as e:
                     st.session_state.debug_info.append(f"Unhandled exception for {model}: {str(e)}")
@@ -412,13 +437,9 @@ if compare_button:
             
             # Clear progress indicators after completion
             progress_bar.empty()
-            progress_text.empty()
-            if response_length:
-                response_length.empty()
+            progress_container.empty()
             if streaming_display:
                 streaming_display.empty()
-                
-            st.success(f"Completed {len(selected_models)} model queries")
             
             with st.expander("Debug Information", expanded=False):
                 for line in st.session_state.debug_info:
@@ -431,14 +452,12 @@ if st.session_state.results:
     # Clear streaming section once we have results
     streaming_section.empty()
     
-    # show response status summary
+    # show response status summary only if there are errors
     success_count = sum(1 for r in st.session_state.results.values() if not r.startswith("Error"))
     error_count = len(st.session_state.results) - success_count
     
     if error_count > 0:
         st.warning(f"{success_count} successful responses, {error_count} errors")
-    else:
-        st.success(f"All {len(st.session_state.results)} responses generated successfully")
     
     # tabs for different view modes
     tab1, tab2 = st.tabs(["Side by Side", "Stacked"])
@@ -511,14 +530,19 @@ if st.session_state.results:
         "Length": [len(response) for response in st.session_state.results.values()]
     })
     
+    # Place download buttons side by side
+    col1, col2 = st.columns(2)
+    
     # export as CSV
     csv = results_df.to_csv(index=False)
-    st.download_button(
-        label="Download as CSV",
-        data=csv,
-        file_name="ollama_model_comparison.csv",
-        mime="text/csv",
-    )
+    with col1:
+        st.download_button(
+            label="Download as CSV",
+            data=csv,
+            file_name="ollama_model_comparison.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
     
     # export as JSON
     json_results = json.dumps({
@@ -529,9 +553,11 @@ if st.session_state.results:
         "response_lengths": {model: len(response) for model, response in st.session_state.results.items()}
     }, indent=2)
     
-    st.download_button(
-        label="Download as JSON",
-        data=json_results,
-        file_name="ollama_model_comparison.json",
-        mime="application/json",
-    )
+    with col2:
+        st.download_button(
+            label="Download as JSON",
+            data=json_results,
+            file_name="ollama_model_comparison.json",
+            mime="application/json",
+            use_container_width=True
+        )
