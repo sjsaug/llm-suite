@@ -185,95 +185,40 @@ def query_model_streaming(model_name: str, prompt: str, system_prompt: Optional[
         st.session_state.debug_info.append(error_msg)
         return f"Error: Unable to stream from model. Error: {str(e)}"
 
-# sidebar
+# --- Sidebar Tabs Navigation ---
 with st.sidebar:
-    st.header("Settings")
-    
-    # model selection
-    st.subheader("Select Models to Compare")
-    selected_models = []
-    
-    # get models
-    base_model_names, models_info = get_available_models()
-    
-    if not models_info:
-        st.warning("No models found. Make sure Ollama is running.")
-    
-    # group models by base model name
-    models_by_family = {}
-    model_info_by_name = {}  # For quick lookups by model name
-    
-    for model in models_info:
-        base_name = model["base_name"]
-        model_info_by_name[model["name"]] = model
-        if base_name not in models_by_family:
-            models_by_family[base_name] = []
-        models_by_family[base_name].append(model["name"])
-    
-    # select all - with button and label side by side (using label parameter instead of columns)
-    select_all = st.checkbox("Select All Models", key="select_all", value=False)
-    
-    # If select all is checked, select all models and hide individual model selections
-    if select_all:
-        selected_models = [model["name"] for model in models_info]
-    else:
-        # Handle each model family - always use expanders
-        for base_name, versions in models_by_family.items():
-            if len(versions) == 1:
-                # Even for single model, use an expander
-                with st.expander(f"{base_name} (1 version)", expanded=True):
-                    model_name = versions[0]
-                    model_info = model_info_by_name[model_name]
-                    
-                    # Create help tooltip with model details
-                    help_text = f"""
-                    Base Model: {model_info['base_name']}
-                    Version: {model_info['version']} 
-                    Size: {model_info['size_mb']} MB
-                    """
-                    
-                    # Add additional details if available
-                    if "family" in model_info:
-                        help_text += f"\nFamily: {model_info['family']}"
-                    if "parameter_size" in model_info:
-                        help_text += f"\nParameter Size: {model_info['parameter_size']}"
-                    if "quantization_level" in model_info:
-                        help_text += f"\nQuantization: {model_info['quantization_level']}"
-                    if "format" in model_info:
-                        help_text += f"\nFormat: {model_info['format']}"
-                    
-                    # Combine checkbox and help in one line
-                    if st.checkbox(f"{model_name}", key=f"model_{model_name}", help=help_text):
-                        selected_models.append(model_name)
-            else:
-                # For multiple versions, use expander
-                with st.expander(f"{base_name} ({len(versions)} versions)", expanded=True):
-                    # select all versions of this model
-                    family_models = [version for version in versions]
-                    
-                    # First count how many models from this family are already selected
-                    family_models_selected = [version for version in versions if version in selected_models]
-                    all_family_selected = len(family_models_selected) == len(versions)
-                    
-                    # Use label parameter for "Select all family versions" instead of columns
-                    select_all_family = st.checkbox(
-                        f"Select all {base_name} versions", 
-                        key=f"select_all_{base_name}",
-                        value=all_family_selected
-                    )
-                    
-                    # Show models in a single column (one per row) instead of 2 columns
-                    for version in versions:
-                        model_info = model_info_by_name[version]
-                        
-                        # Create help text for tooltip
+    st.markdown("## LLM Suite")
+    sidebar_tabs = st.tabs(["Models", "Settings"])
+
+    # --- Models Tab ---
+    with sidebar_tabs[0]:
+        selected_models = []
+        st.subheader("Select Models to Compare")
+        base_model_names, models_info = get_available_models()
+        if not models_info:
+            st.warning("No models found. Make sure Ollama is running.")
+        models_by_family = {}
+        model_info_by_name = {}
+        for model in models_info:
+            base_name = model["base_name"]
+            model_info_by_name[model["name"]] = model
+            if base_name not in models_by_family:
+                models_by_family[base_name] = []
+            models_by_family[base_name].append(model["name"])
+        select_all = st.checkbox("Select All Models", key="select_all", value=False)
+        if select_all:
+            selected_models = [model["name"] for model in models_info]
+        else:
+            for base_name, versions in models_by_family.items():
+                if len(versions) == 1:
+                    with st.expander(f"{base_name} (1 version)", expanded=True):
+                        model_name = versions[0]
+                        model_info = model_info_by_name[model_name]
                         help_text = f"""
                         Base Model: {model_info['base_name']}
                         Version: {model_info['version']} 
                         Size: {model_info['size_mb']} MB
                         """
-                        
-                        # Add additional details if available
                         if "family" in model_info:
                             help_text += f"\nFamily: {model_info['family']}"
                         if "parameter_size" in model_info:
@@ -282,67 +227,82 @@ with st.sidebar:
                             help_text += f"\nQuantization: {model_info['quantization_level']}"
                         if "format" in model_info:
                             help_text += f"\nFormat: {model_info['format']}"
-                        
-                        # Check if this model should be checked based on select_all_family
-                        is_checked = select_all_family or (version in selected_models)
-                        
-                        # Use checkbox for model selection
-                        model_selection = st.checkbox(
-                            f"{version}", 
-                            key=f"model_{version}", 
-                            value=is_checked,
-                            help=help_text
+                        if st.checkbox(f"{model_name}", key=f"model_{model_name}", help=help_text):
+                            selected_models.append(model_name)
+                else:
+                    with st.expander(f"{base_name} ({len(versions)} versions)", expanded=True):
+                        select_all_family = st.checkbox(
+                            f"Select all {base_name} versions",
+                            key=f"select_all_{base_name}",
+                            value=False
                         )
-                        
-                        # Update selected_models based on checkbox
-                        if model_selection and version not in selected_models:
-                            selected_models.append(version)
-                        elif not model_selection and version in selected_models:
-                            selected_models.remove(version)
-                            
-    # selected models count with proper grammar
-    if selected_models:
-        if len(selected_models) == 1:
-            st.info(f"Selected 1 model: {selected_models[0]}")
+                        if select_all_family:
+                            # If select all family is checked, add all versions and hide individual checkboxes
+                            selected_models.extend([version for version in versions if version not in selected_models])
+                        else:
+                            # Show individual checkboxes for each version
+                            for version in versions:
+                                model_info = model_info_by_name[version]
+                                help_text = f"""
+                                Base Model: {model_info['base_name']}
+                                Version: {model_info['version']} 
+                                Size: {model_info['size_mb']} MB
+                                """
+                                if "family" in model_info:
+                                    help_text += f"\nFamily: {model_info['family']}"
+                                if "parameter_size" in model_info:
+                                    help_text += f"\nParameter Size: {model_info['parameter_size']}"
+                                if "quantization_level" in model_info:
+                                    help_text += f"\nQuantization: {model_info['quantization_level']}"
+                                if "format" in model_info:
+                                    help_text += f"\nFormat: {model_info['format']}"
+                                if st.checkbox(f"{version}", key=f"model_{version}", help=help_text):
+                                    selected_models.append(version)
+                                elif version in selected_models:
+                                    selected_models.remove(version)
+        if selected_models:
+            if len(selected_models) == 1:
+                st.info(f"Selected 1 model: {selected_models[0]}")
+            else:
+                st.info(f"Selected {len(selected_models)} models: {', '.join(selected_models)}")
         else:
-            st.info(f"Selected {len(selected_models)} models: {', '.join(selected_models)}")
-    else:
-        st.info("No models selected")
-    
-    # extra params
-    st.subheader("Parameters")
-    
-    # Add streaming option (checked by default)
-    enable_streaming = st.checkbox("Enable streaming", value=True, 
-                                  help="Show responses as they are generated. You'll see the text being generated in real-time.")
-    
-    temperature = st.slider("Temperature", min_value=0.0, max_value=2.0, value=0.7, step=0.1)
-    
-    # optional system prompt
-    st.subheader("System Prompt (Optional)")
-    system_prompt = st.text_area("Enter a system prompt", 
-                               "")
-    
-    # Move refresh models button and model count to bottom
-    st.subheader("Model Management")
-    
-    if st.button("Refresh Available Models"):
-        st.cache_data.clear()
-        st.rerun()
-        
-    if models_info:
-        st.success(f"Found {len(models_info)} models across {len(base_model_names)} model families")
+            st.info("No models selected")
+
+    # --- Settings Tab ---
+    with sidebar_tabs[1]:
+        st.subheader("Parameters")
+        enable_streaming = st.checkbox("Enable streaming", value=True, 
+                                      help="Show responses as they are generated. You'll see the text being generated in real-time.",
+                                      key="enable_streaming")
+        temperature = st.slider("Temperature", min_value=0.0, max_value=2.0, value=0.7, step=0.1, key="temperature")
+        st.subheader("System Prompt (Optional)")
+        system_prompt = st.text_area("Enter a system prompt", "", key="system_prompt")
+        st.subheader("Model Management")
+        if st.button("Refresh Available Models", key="refresh_models"):
+            st.cache_data.clear()
+            st.rerun()
+        base_model_names, models_info = get_available_models()
+        if models_info:
+            st.success(f"Found {len(models_info)} models across {len(base_model_names)} model families")
+
+# --- Ensure settings variables are available regardless of sidebar tab ---
+if 'enable_streaming' not in st.session_state:
+    st.session_state.enable_streaming = True
+if 'temperature' not in st.session_state:
+    st.session_state.temperature = 0.7
+if 'system_prompt' not in st.session_state:
+    st.session_state.system_prompt = ""
+
+enable_streaming = st.session_state.enable_streaming
+temperature = st.session_state.temperature
+system_prompt = st.session_state.system_prompt
 
 st.header("Enter Your Prompt")
 user_prompt = st.text_area("The same prompt will be sent to all selected models", 
                           "")
 
-# Add row for compare and clear buttons
-col1, col2 = st.columns([1, 1])
-with col1:
-    compare_button = st.button("Compare Models", use_container_width=True)
-with col2:
-    clear_button = st.button("Clear Results", type="secondary", use_container_width=True)
+# Replace the two buttons with a single Compare Models button
+compare_button = st.button("Compare Models", use_container_width=True)
 
 # Add a stop button that only shows during inference
 stop_button_container = st.empty()
@@ -357,12 +317,6 @@ if 'results' not in st.session_state:
 # Add a "running" flag to track inference status
 if 'inference_running' not in st.session_state:
     st.session_state.inference_running = False
-
-if clear_button:
-    st.session_state.results = {}
-    st.session_state.current_streaming_text = ""
-    st.session_state.inference_running = False
-    st.rerun()
 
 # MOVED: Progress container and bar ABOVE streaming section
 progress_container = st.empty()
@@ -442,6 +396,10 @@ if compare_button:
     if not selected_models:
         st.warning("Please select at least one model to compare.")
     else:
+        # Clear previous results first (was previously done by the Clear Results button)
+        st.session_state.results = {}
+        st.session_state.current_streaming_text = ""
+        
         # Reset stop flag
         st.session_state.stop_inference = False
         # Set inference running flag
@@ -582,19 +540,3 @@ if st.session_state.results:
         for model, response in st.session_state.results.items():
             with st.expander(f"{model} ({len(response)} chars)", expanded=True):
                 st.markdown(f"<div class='model-response'>{html.escape(response)}</div>", unsafe_allow_html=True)
-    
-    # Removed the export options section that was here as we moved it above
-
-# Auto-check the 'select all x versions' checkbox based on individual model selections after rendering
-for base_name, versions in models_by_family.items():
-    if len(versions) > 1:
-        # Update the "select all" checkbox for this family
-        family_all_selected = all(f"model_{version}" in st.session_state and st.session_state[f"model_{version}"] 
-                                  for version in versions)
-        
-        # Check if this key exists in session state
-        select_all_key = f"select_all_{base_name}"
-        if select_all_key in st.session_state:
-            # Only update if the value would change (to avoid triggering reruns)
-            if st.session_state[select_all_key] != family_all_selected:
-                st.session_state[select_all_key] = family_all_selected
