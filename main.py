@@ -42,35 +42,6 @@ st.markdown("""
         text-align: center;
         margin-bottom: 30px;
     }
-    /* Blue styling for UI elements */
-    .stButton>button {
-        border-color: #0068c9 !important;
-        color: #0068c9 !important;
-    }
-    
-    /* Style for checkboxes */
-    [data-testid="stCheckbox"] svg {
-        fill: #0068c9 !important;
-    }
-    
-    /* Style for sliders */
-    [data-testid="stThumbValue"] {
-        color: #0068c9 !important;
-    }
-    
-    .stSlider [aria-valuemax] {
-        background-color: rgba(0, 104, 201, 0.2) !important;
-    }
-    
-    .stSlider [aria-valuenow] {
-        background-color: #0068c9 !important;
-    }
-    
-    /* Blue hover effects */
-    .stButton>button:hover {
-        border-color: #044a8f !important;
-        background-color: #e6f0ff !important;
-    }
     
     /* Hide Streamlit menu */
     #MainMenu {visibility: hidden;}
@@ -279,10 +250,10 @@ with st.sidebar:
                 with st.expander(f"{base_name} ({len(versions)} versions)", expanded=True):
                     # select all versions of this model
                     family_models = [version for version in versions]
-                    family_models_selected = [version for version in versions if version in selected_models]
                     
-                    # Check if all models in this family are selected
-                    all_family_selected = all(version in selected_models for version in versions)
+                    # First count how many models from this family are already selected
+                    family_models_selected = [version for version in versions if version in selected_models]
+                    all_family_selected = len(family_models_selected) == len(versions)
                     
                     # Use label parameter for "Select all family versions" instead of columns
                     select_all_family = st.checkbox(
@@ -291,18 +262,8 @@ with st.sidebar:
                         value=all_family_selected
                     )
                     
-                    # Handle selecting/deselecting all versions in this family
-                    if select_all_family:
-                        # Add all versions to selected_models
-                        for version in versions:
-                            if version not in selected_models:
-                                selected_models.append(version)
-                        family_models_selected = family_models.copy()
-                    
-                    # create columns for checkboxes to make better use of space
-                    cols = st.columns(2)
-                    for i, version in enumerate(versions):
-                        col_idx = i % 2
+                    # Show models in a single column (one per row) instead of 2 columns
+                    for version in versions:
                         model_info = model_info_by_name[version]
                         
                         # Create help text for tooltip
@@ -322,36 +283,23 @@ with st.sidebar:
                         if "format" in model_info:
                             help_text += f"\nFormat: {model_info['format']}"
                         
-                        with cols[col_idx]:
-                            # Check if this model should be checked based on select_all_family
-                            is_checked = select_all_family or version in selected_models
+                        # Check if this model should be checked based on select_all_family
+                        is_checked = select_all_family or (version in selected_models)
+                        
+                        # Use checkbox for model selection
+                        model_selection = st.checkbox(
+                            f"{version}", 
+                            key=f"model_{version}", 
+                            value=is_checked,
+                            help=help_text
+                        )
+                        
+                        # Update selected_models based on checkbox
+                        if model_selection and version not in selected_models:
+                            selected_models.append(version)
+                        elif not model_selection and version in selected_models:
+                            selected_models.remove(version)
                             
-                            # Use checkbox for model selection
-                            model_selection = st.checkbox(
-                                f"{version}", 
-                                key=f"model_{version}", 
-                                value=is_checked,
-                                help=help_text
-                            )
-                            
-                            # Update selected_models based on checkbox
-                            if model_selection and version not in selected_models:
-                                selected_models.append(version)
-                            elif not model_selection and version in selected_models:
-                                selected_models.remove(version)
-                            
-                            # Update family_models_selected for tracking
-                            if model_selection and version not in family_models_selected:
-                                family_models_selected.append(version)
-                            elif not model_selection and version in family_models_selected:
-                                family_models_selected.remove(version)
-                    
-                    # Update select_all_family if individual models are deselected
-                    if len(family_models_selected) != len(family_models) and select_all_family:
-                        # This is a workaround - can't directly modify checkbox state
-                        # But we can update the session state for the next rerun
-                        st.session_state[f"select_all_{base_name}"] = False
-    
     # selected models count with proper grammar
     if selected_models:
         if len(selected_models) == 1:
@@ -389,19 +337,31 @@ st.header("Enter Your Prompt")
 user_prompt = st.text_area("The same prompt will be sent to all selected models", 
                           "")
 
+# Add row for compare and clear buttons
 col1, col2 = st.columns([1, 1])
 with col1:
     compare_button = st.button("Compare Models", use_container_width=True)
 with col2:
     clear_button = st.button("Clear Results", type="secondary", use_container_width=True)
 
+# Add a stop button that only shows during inference
+stop_button_container = st.empty()
+
+# Move download buttons to this location
+download_buttons_container = st.container()
+
 # store results in session state to persist between reruns
 if 'results' not in st.session_state:
     st.session_state.results = {}
 
+# Add a "running" flag to track inference status
+if 'inference_running' not in st.session_state:
+    st.session_state.inference_running = False
+
 if clear_button:
     st.session_state.results = {}
     st.session_state.current_streaming_text = ""
+    st.session_state.inference_running = False
     st.rerun()
 
 # MOVED: Progress container and bar ABOVE streaming section
@@ -411,66 +371,142 @@ progress_bar = st.empty()
 # Section for live streaming display
 streaming_section = st.empty()
 
+# Add a stop inference handler
+if 'stop_inference' not in st.session_state:
+    st.session_state.stop_inference = False
+
+# Define the model processing function before using it
+def process_models():
+    # Set up streaming if enabled
+    streaming_display = None
+    if enable_streaming:
+        # Create container for streaming display
+        streaming_display = streaming_section.empty()
+    
+    # process each model one at a time (IMPORTANT)
+    for i, model in enumerate(selected_models):
+        # Check if inference was stopped
+        if st.session_state.stop_inference:
+            st.session_state.debug_info.append("Inference stopped by user")
+            break
+            
+        try:
+            if enable_streaming:
+                # Combined progress text and length counter on same line
+                progress_container.markdown(f"**Model {i+1}/{len(selected_models)}:** {model} | Response length: 0 characters")
+                progress_bar.progress((i) / len(selected_models))
+                
+                # Reset streaming display for next model
+                st.session_state.current_streaming_text = ""
+                
+                response = query_model_streaming(
+                    model, 
+                    user_prompt, 
+                    system_prompt, 
+                    temperature, 
+                    progress_container,  # Pass the container for updates
+                    progress_container,  # Use same container for length updates
+                    streaming_display
+                )
+            else:
+                # Show processing message when not streaming
+                progress_container.markdown(f"**Generating {i+1}/{len(selected_models)}:** {model}")
+                progress_bar.progress((i) / len(selected_models))
+                st.session_state.debug_info.append(f"Processing model {i+1}/{len(selected_models)}: {model}")
+                response = query_model(model, user_prompt, system_prompt, temperature)
+            
+            st.session_state.results[model] = response
+            progress_bar.progress((i + 1) / len(selected_models))
+            
+        except Exception as e:
+            st.session_state.debug_info.append(f"Unhandled exception for {model}: {str(e)}")
+            st.session_state.results[model] = f"Unhandled error: {str(e)}"
+    
+    # Clear progress indicators after completion
+    progress_bar.empty()
+    progress_container.empty()
+    if streaming_display:
+        streaming_display.empty()
+    
+    # Fixed debug information expander
+    with st.expander("Debug Information"):
+        st.code("\n".join(st.session_state.debug_info))
+    
+    # Clear stop button when done
+    stop_button_container.empty()
+    
+    # Set inference running flag to false
+    st.session_state.inference_running = False
+
 if compare_button:
     if not selected_models:
         st.warning("Please select at least one model to compare.")
     else:
+        # Reset stop flag
+        st.session_state.stop_inference = False
+        # Set inference running flag
+        st.session_state.inference_running = True
+        
+        # Show stop button
+        with stop_button_container:
+            if st.button("Stop Inference", type="primary", use_container_width=True):
+                st.session_state.stop_inference = True
+                st.info("Stopping inference... please wait.")
+                st.rerun()
+                
         # clear prev results
         st.session_state.debug_info = []
         st.session_state.debug_info.append(f"Starting comparison with {len(selected_models)} models")
         
-        with st.spinner():  # Remove the "Generating responses..." text that appears when streaming is disabled
-            # Using previously defined progress containers
-            
-            # Set up streaming if enabled
-            streaming_display = None
-            if enable_streaming:
-                # Create container for streaming display
-                streaming_display = streaming_section.empty()
-            
-            # process each model one at a time (IMPORTANT)
-            for i, model in enumerate(selected_models):
-                try:
-                    if enable_streaming:
-                        # Combined progress text and length counter on same line
-                        progress_container.markdown(f"**Model {i+1}/{len(selected_models)}:** {model} | Response length: 0 characters")
-                        progress_bar.progress((i) / len(selected_models))
-                        
-                        # Reset streaming display for next model
-                        st.session_state.current_streaming_text = ""
-                        
-                        response = query_model_streaming(
-                            model, 
-                            user_prompt, 
-                            system_prompt, 
-                            temperature, 
-                            progress_container,  # Pass the container for updates
-                            progress_container,  # Use same container for length updates
-                            streaming_display
-                        )
-                    else:
-                        # Show processing message when not streaming
-                        progress_container.markdown(f"**Generating {i+1}/{len(selected_models)}:** {model}")
-                        progress_bar.progress((i) / len(selected_models))
-                        st.session_state.debug_info.append(f"Processing model {i+1}/{len(selected_models)}: {model}")
-                        response = query_model(model, user_prompt, system_prompt, temperature)
-                    
-                    st.session_state.results[model] = response
-                    progress_bar.progress((i + 1) / len(selected_models))
-                    
-                except Exception as e:
-                    st.session_state.debug_info.append(f"Unhandled exception for {model}: {str(e)}")
-                    st.session_state.results[model] = f"Unhandled error: {str(e)}"
-            
-            # Clear progress indicators after completion
-            progress_bar.empty()
-            progress_container.empty()
-            if streaming_display:
-                streaming_display.empty()
-            
-            # Fixed debug information expander
-            with st.expander("Debug Information"):
-                st.code("\n".join(st.session_state.debug_info))
+        # Only use spinner when NOT streaming to avoid the "In Progress..." text
+        if not enable_streaming:
+            with st.spinner("Generating responses..."):
+                process_models()
+        else:
+            # When streaming, don't use the spinner so no "In Progress..." appears
+            process_models()
+
+# Only show download buttons when we have results
+with download_buttons_container:
+    if st.session_state.results:
+        # convert results to DataFrame for export
+        results_df = pd.DataFrame({
+            "Model": list(st.session_state.results.keys()),
+            "Response": list(st.session_state.results.values()),
+            "Length": [len(response) for response in st.session_state.results.values()]
+        })
+        
+        # Place download buttons side by side
+        col1, col2 = st.columns(2)
+        
+        # export as CSV
+        csv = results_df.to_csv(index=False)
+        with col1:
+            st.download_button(
+                label="Download as CSV",
+                data=csv,
+                file_name="ollama_model_comparison.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+        
+        # export as JSON
+        json_results = json.dumps({
+            "prompt": user_prompt,
+            "system_prompt": system_prompt,
+            "temperature": temperature,
+            "results": st.session_state.results,
+            "response_lengths": {model: len(response) for model, response in st.session_state.results.items()}
+        }, indent=2)
+        
+        with col2:
+            st.download_button(
+                label="Download as JSON",
+                data=json_results,
+                file_name="ollama_model_comparison.json",
+                mime="application/json",
+                use_container_width=True
+            )
 
 # display results
 if st.session_state.results:
@@ -501,7 +537,7 @@ if st.session_state.results:
             model_name = models_with_results[0]
             response = st.session_state.results[model_name]
             st.subheader(f"{model_name} ({len(response)} chars)")
-            st.markdown(f"<div class='model-response'>{response}</div>", 
+            st.markdown(f"<div class='model-response'>{html.escape(response)}</div>", 
                        unsafe_allow_html=True)
         elif len(models_with_results) == 2:
             # Two models - show side by side in two columns
@@ -510,13 +546,13 @@ if st.session_state.results:
                 model_name = models_with_results[0]
                 response = st.session_state.results[model_name]
                 st.subheader(f"{model_name} ({len(response)} chars)")
-                st.markdown(f"<div class='model-response'>{response}</div>", 
+                st.markdown(f"<div class='model-response'>{html.escape(response)}</div>", 
                            unsafe_allow_html=True)
             with col2:
                 model_name = models_with_results[1]
                 response = st.session_state.results[model_name]
                 st.subheader(f"{model_name} ({len(response)} chars)")
-                st.markdown(f"<div class='model-response'>{response}</div>", 
+                st.markdown(f"<div class='model-response'>{html.escape(response)}</div>", 
                            unsafe_allow_html=True)
         else:
             # More than two models - show two per row
@@ -529,7 +565,7 @@ if st.session_state.results:
                     model_name = models_with_results[i]
                     response = st.session_state.results[model_name]
                     st.subheader(f"{model_name} ({len(response)} chars)")
-                    st.markdown(f"<div class='model-response'>{response}</div>", 
+                    st.markdown(f"<div class='model-response'>{html.escape(response)}</div>", 
                                unsafe_allow_html=True)
                 
                 # Second column in the row (if available)
@@ -538,53 +574,27 @@ if st.session_state.results:
                         model_name = models_with_results[i + 1]
                         response = st.session_state.results[model_name]
                         st.subheader(f"{model_name} ({len(response)} chars)")
-                        st.markdown(f"<div class='model-response'>{response}</div>", 
+                        st.markdown(f"<div class='model-response'>{html.escape(response)}</div>", 
                                    unsafe_allow_html=True)
     
     with tab2:
         # stacked view
         for model, response in st.session_state.results.items():
             with st.expander(f"{model} ({len(response)} chars)", expanded=True):
-                st.markdown(f"<div class='model-response'>{response}</div>", unsafe_allow_html=True)
-                
-    # export options
-    st.header("Export Results")
+                st.markdown(f"<div class='model-response'>{html.escape(response)}</div>", unsafe_allow_html=True)
     
-    # convert results to DataFrame for export
-    results_df = pd.DataFrame({
-        "Model": list(st.session_state.results.keys()),
-        "Response": list(st.session_state.results.values()),
-        "Length": [len(response) for response in st.session_state.results.values()]
-    })
-    
-    # Place download buttons side by side
-    col1, col2 = st.columns(2)
-    
-    # export as CSV
-    csv = results_df.to_csv(index=False)
-    with col1:
-        st.download_button(
-            label="Download as CSV",
-            data=csv,
-            file_name="ollama_model_comparison.csv",
-            mime="text/csv",
-            use_container_width=True
-        )
-    
-    # export as JSON
-    json_results = json.dumps({
-        "prompt": user_prompt,
-        "system_prompt": system_prompt,
-        "temperature": temperature,
-        "results": st.session_state.results,
-        "response_lengths": {model: len(response) for model, response in st.session_state.results.items()}
-    }, indent=2)
-    
-    with col2:
-        st.download_button(
-            label="Download as JSON",
-            data=json_results,
-            file_name="ollama_model_comparison.json",
-            mime="application/json",
-            use_container_width=True
-        )
+    # Removed the export options section that was here as we moved it above
+
+# Auto-check the 'select all x versions' checkbox based on individual model selections after rendering
+for base_name, versions in models_by_family.items():
+    if len(versions) > 1:
+        # Update the "select all" checkbox for this family
+        family_all_selected = all(f"model_{version}" in st.session_state and st.session_state[f"model_{version}"] 
+                                  for version in versions)
+        
+        # Check if this key exists in session state
+        select_all_key = f"select_all_{base_name}"
+        if select_all_key in st.session_state:
+            # Only update if the value would change (to avoid triggering reruns)
+            if st.session_state[select_all_key] != family_all_selected:
+                st.session_state[select_all_key] = family_all_selected

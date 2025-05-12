@@ -1,7 +1,4 @@
 - Edge case: when 'select all x versions' is checked, where x is the model, all models in that family are checked BUT if one or more are unchecked, 'select all x verisions' is not unchecked (it should be): trying to do so results in the following (when tested on the deepseek-r1 family): streamlit.errors.StreamlitAPIException: st.session_state.select_all_deepseek-r1 cannot be modified after the widget with key select_all_deepseek-r1 is instantiated
-- 'In progress...' should not display when 'Enable streaming' is checked, only when it is unchecked
-- Elements (checkboxes, sliders) from red -> blue
-- Add a button to stop inference -> skips to final results page
 
 ADVANCED:
 - For models that have thought processes, like deepseek-r1, add checkbox parameter to include thought processes in final response or not (parse them out if not - will require some troubleshooting)
