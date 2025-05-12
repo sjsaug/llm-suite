@@ -4,6 +4,7 @@ import pandas as pd
 import ollama
 from typing import Optional
 import html
+import re
 
 # st page config
 st.set_page_config(
@@ -255,6 +256,11 @@ with st.sidebar:
         enable_streaming = st.checkbox("Enable streaming", value=True, 
                                       help="Show responses as they are generated. You'll see the text being generated in real-time.",
                                       key="enable_streaming")
+        remove_think_blocks_setting = st.checkbox(
+            "Parse thought blocks",
+            value=False,
+            help="Remove any model thought processes from the final response",
+        )
         temperature = st.slider("Temperature", min_value=0.0, max_value=2.0, value=0.7, step=0.1, key="temperature")
         st.subheader("System Prompt (Optional)")
         system_prompt = st.text_area("Enter a system prompt", "", key="system_prompt")
@@ -349,6 +355,9 @@ def process_models(selected_models):
     # Set inference running flag to false
     st.session_state.inference_running = False
 
+def remove_think_blocks(text):
+    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+
 if compare_button:
     if not selected_models:
         st.warning("Please select at least one model to compare.")
@@ -435,31 +444,31 @@ if st.session_state.results:
             models_with_results = list(st.session_state.results.keys())
         
         if len(models_with_results) == 1:
-            # Edge case: one column for single model
             model_name = models_with_results[0]
             response = st.session_state.results[model_name]
+            # --- Remove <think>...</think> if setting is enabled ---
+            if remove_think_blocks_setting:
+                response = remove_think_blocks(response)
             st.subheader(f"{model_name} ({len(response)} chars)")
             st.markdown(f"<div class='model-response'>{html.escape(response)}</div>", 
                        unsafe_allow_html=True)
         else:
-            # Display models in a grid (2 columns)
             for i in range(0, len(models_with_results), 2):
-                # Create a new row with two columns
                 row_cols = st.columns(2)
-                
-                # First column in the row
                 with row_cols[0]:
                     model_name = models_with_results[i]
                     response = st.session_state.results[model_name]
+                    if remove_think_blocks_setting:
+                        response = remove_think_blocks(response)
                     st.subheader(f"{model_name} ({len(response)} chars)")
                     st.markdown(f"<div class='model-response'>{html.escape(response)}</div>", 
                                unsafe_allow_html=True)
-                
-                # Second column in the row (if available)
                 if i + 1 < len(models_with_results):
                     with row_cols[1]:
                         model_name = models_with_results[i + 1]
                         response = st.session_state.results[model_name]
+                        if remove_think_blocks_setting:
+                            response = remove_think_blocks(response)
                         st.subheader(f"{model_name} ({len(response)} chars)")
                         st.markdown(f"<div class='model-response'>{html.escape(response)}</div>", 
                                    unsafe_allow_html=True)
@@ -467,5 +476,7 @@ if st.session_state.results:
     with tab2:
         # Stacked view
         for model, response in st.session_state.results.items():
+            if remove_think_blocks_setting:
+                response = remove_think_blocks(response)
             with st.expander(f"{model} ({len(response)} chars)", expanded=True):
                 st.markdown(f"<div class='model-response'>{html.escape(response)}</div>", unsafe_allow_html=True)

@@ -1,7 +1,6 @@
 - Update readme
 
 ADVANCED:
-- For models that have thought processes, like deepseek-r1, add checkbox parameter to include thought processes in final response or not (parse them out if not - will require some troubleshooting)
 - Add an 'evaluation model' that looks over all of the responses and judges which response is the most recurring - useful for STEM questions
 - Model management (download, remove, custom gguf models?), list of recommended models for hardware spec? (could be based off of available system VRAM -> all models under x billion parameters. ie. 8GB VRAM -> all models under 8B parameters -> fetch list matching constraints from available ollama models)
 - Model benchmarks: provide tokens/sec & other metrics
