@@ -424,48 +424,6 @@ if compare_button:
             # When streaming, don't use the spinner so no "In Progress..." appears
             process_models()
 
-# Only show download buttons when we have results
-with download_buttons_container:
-    if st.session_state.results:
-        # convert results to DataFrame for export
-        results_df = pd.DataFrame({
-            "Model": list(st.session_state.results.keys()),
-            "Response": list(st.session_state.results.values()),
-            "Length": [len(response) for response in st.session_state.results.values()]
-        })
-        
-        # Place download buttons side by side
-        col1, col2 = st.columns(2)
-        
-        # export as CSV
-        csv = results_df.to_csv(index=False)
-        with col1:
-            st.download_button(
-                label="Download as CSV",
-                data=csv,
-                file_name="ollama_model_comparison.csv",
-                mime="text/csv",
-                use_container_width=True
-            )
-        
-        # export as JSON
-        json_results = json.dumps({
-            "prompt": user_prompt,
-            "system_prompt": system_prompt,
-            "temperature": temperature,
-            "results": st.session_state.results,
-            "response_lengths": {model: len(response) for model, response in st.session_state.results.items()}
-        }, indent=2)
-        
-        with col2:
-            st.download_button(
-                label="Download as JSON",
-                data=json_results,
-                file_name="ollama_model_comparison.json",
-                mime="application/json",
-                use_container_width=True
-            )
-
 # display results
 if st.session_state.results:
     st.header("Model Responses")
@@ -480,6 +438,40 @@ if st.session_state.results:
     if error_count > 0:
         st.warning(f"{success_count} successful responses, {error_count} errors")
     
+    # --- Move download buttons here ---
+    # convert results to DataFrame for export
+    results_df = pd.DataFrame({
+        "Model": list(st.session_state.results.keys()),
+        "Response": list(st.session_state.results.values()),
+        "Length": [len(response) for response in st.session_state.results.values()]
+    })
+    col1, col2 = st.columns(2)
+    csv = results_df.to_csv(index=False)
+    with col1:
+        st.download_button(
+            label="Download as CSV",
+            data=csv,
+            file_name="ollama_model_comparison.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
+    json_results = json.dumps({
+        "prompt": user_prompt,
+        "system_prompt": system_prompt,
+        "temperature": temperature,
+        "results": st.session_state.results,
+        "response_lengths": {model: len(response) for model, response in st.session_state.results.items()}
+    }, indent=2)
+    with col2:
+        st.download_button(
+            label="Download as JSON",
+            data=json_results,
+            file_name="ollama_model_comparison.json",
+            mime="application/json",
+            use_container_width=True
+        )
+    # --- End download buttons section ---
+
     # tabs for different view modes
     tab1, tab2 = st.tabs(["Side by Side", "Stacked"])
     
