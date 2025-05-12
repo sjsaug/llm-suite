@@ -203,15 +203,13 @@ with st.sidebar:
                         Base Model: {model_info['base_name']}
                         Version: {model_info['version']} 
                         Size: {model_info['size_mb']} MB
+                        Family: {model_info['family']}
+                        Parameter Size: {model_info['parameter_size']}
+                        Quantization: {model_info['quantization_level']}
+                        Format: {model_info['format']}
                         """
-                        if "family" in model_info:
-                            help_text += f"\nFamily: {model_info['family']}"
-                        if "parameter_size" in model_info:
-                            help_text += f"\nParameter Size: {model_info['parameter_size']}"
-                        if "quantization_level" in model_info:
-                            help_text += f"\nQuantization: {model_info['quantization_level']}"
                         if "format" in model_info:
-                            help_text += f"\nFormat: {model_info['format']}"
+                            help_text += f"\n{model_info['base_name']}:{model_info['version']}"
                         if st.checkbox(f"{model_name}", key=f"model_{model_name}", help=help_text):
                             selected_models.append(model_name)
                 else:
@@ -230,17 +228,15 @@ with st.sidebar:
                                 model_info = model_info_by_name[version]
                                 help_text = f"""
                                 Base Model: {model_info['base_name']}
-                                Version: {model_info['version']} 
-                                Size: {model_info['size_mb']} MB
+                            Version: {model_info['version']} 
+                            Size: {model_info['size_mb']} MB
+                            Family: {model_info['family']}
+                            Parameter Size: {model_info['parameter_size']}
+                            Quantization: {model_info['quantization_level']}
+                            Format: {model_info['format']}
                                 """
-                                if "family" in model_info:
-                                    help_text += f"\nFamily: {model_info['family']}"
-                                if "parameter_size" in model_info:
-                                    help_text += f"\nParameter Size: {model_info['parameter_size']}"
-                                if "quantization_level" in model_info:
-                                    help_text += f"\nQuantization: {model_info['quantization_level']}"
                                 if "format" in model_info:
-                                    help_text += f"\nFormat: {model_info['format']}"
+                                    help_text += f"\n{model_info['base_name']}:{model_info['version']}"
                                 if st.checkbox(f"{version}", key=f"model_{version}", help=help_text):
                                     selected_models.append(version)
                                 elif version in selected_models:

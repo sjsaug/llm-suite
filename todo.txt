@@ -1,5 +1,4 @@
 - Update readme
-- Fix model info tooltip
 
 ADVANCED:
 - For models that have thought processes, like deepseek-r1, add checkbox parameter to include thought processes in final response or not (parse them out if not - will require some troubleshooting)
