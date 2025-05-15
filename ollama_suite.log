@@ -1,0 +1,111 @@
+2025-05-15 14:52:25,208 INFO HTTP Request: GET http://127.0.0.1:11434/api/tags "HTTP/1.1 200 OK"
+2025-05-15 14:52:25,510 INFO Ollama /search HTTP status: 200
+2025-05-15 14:52:25,514 INFO Found 0 titles and 0 sizes from Ollama search page
+2025-05-15 14:52:25,514 WARNING No models parsed from Ollama search HTML
+2025-05-15 14:57:07,704 INFO HTTP Request: GET http://127.0.0.1:11434/api/tags "HTTP/1.1 200 OK"
+2025-05-15 14:57:07,960 INFO Ollama /search HTTP status: 200
+2025-05-15 14:57:07,962 INFO Ollama /search HTML snippet: 
+
+
+
+
+
+
+<!doctype html>
+<html class="h-full overflow-y-scroll">
+  <head>
+    <title>Ollama Search</title>
+
+    <meta charset="utf-8" />
+    <meta name="description" content="Search for models on Ollama."/>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta property="og:title" content="Ollama Search" />
+    <meta property="og:description" content="Search for models on Ollama." />
+    <meta property="og:url" content="https://ollama.com/search" />
+    <meta property="og:image" content="https://ollama.com/public/og.png" />
+    <meta property="og:image:type" content="image/png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="628" />
+    <meta property="og:type" content="website" />
+
+    <meta property="twitter:card" content="summary" />
+    <meta property="twitter:title" content="Ollama Search" />
+    <meta property="twitter:description" content="Search for models on Ollama." />
+    <meta property="twitt
+2025-05-15 14:57:07,963 INFO Found 0 titles and 0 sizes from Ollama search page
+2025-05-15 14:57:07,964 WARNING No models parsed from Ollama search HTML
+2025-05-15 14:57:57,521 INFO HTTP Request: GET http://127.0.0.1:11434/api/tags "HTTP/1.1 200 OK"
+2025-05-15 14:57:57,763 INFO Ollama /search HTTP status: 200
+2025-05-15 14:57:57,765 INFO Ollama /search HTML snippet: 
+
+
+
+
+
+
+<!doctype html>
+<html class="h-full overflow-y-scroll">
+  <head>
+    <title>Ollama Search</title>
+
+    <meta charset="utf-8" />
+    <meta name="description" content="Search for models on Ollama."/>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta property="og:title" content="Ollama Search" />
+    <meta property="og:description" content="Search for models on Ollama." />
+    <meta property="og:url" content="https://ollama.com/search" />
+    <meta property="og:image" content="https://ollama.com/public/og.png" />
+    <meta property="og:image:type" content="image/png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="628" />
+    <meta property="og:type" content="website" />
+
+    <meta property="twitter:card" content="summary" />
+    <meta property="twitter:title" content="Ollama Search" />
+    <meta property="twitter:description" content="Search for models on Ollama." />
+    <meta property="twitt
+2025-05-15 14:57:57,765 ERROR Remote model list not available in static HTML. Ollama loads models dynamically via JavaScript.
+2025-05-15 15:02:05,194 INFO HTTP Request: GET http://127.0.0.1:11434/api/tags "HTTP/1.1 200 OK"
+2025-05-15 15:02:05,459 INFO Ollama /search HTTP status: 200
+2025-05-15 15:02:05,461 INFO Ollama /search HTML snippet: 
+
+
+
+
+
+
+<!doctype html>
+<html class="h-full overflow-y-scroll">
+  <head>
+    <title>Ollama Search</title>
+
+    <meta charset="utf-8" />
+    <meta name="description" content="Search for models on Ollama."/>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta property="og:title" content="Ollama Search" />
+    <meta property="og:description" content="Search for models on Ollama." />
+    <meta property="og:url" content="https://ollama.com/search" />
+    <meta property="og:image" content="https://ollama.com/public/og.png" />
+    <meta property="og:image:type" content="image/png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="628" />
+    <meta property="og:type" content="website" />
+
+    <meta property="twitter:card" content="summary" />
+    <meta property="twitter:title" content="Ollama Search" />
+    <meta property="twitter:description" content="Search for models on Ollama." />
+    <meta property="twitt
+2025-05-15 15:02:05,461 ERROR Remote model list not available in static HTML. Ollama loads models dynamically via JavaScript.
+2025-05-15 15:07:56,444 INFO HTTP Request: GET http://127.0.0.1:11434/api/tags "HTTP/1.1 200 OK"
+2025-05-15 15:18:15,312 INFO HTTP Request: GET http://127.0.0.1:11434/api/tags "HTTP/1.1 200 OK"
+2025-05-15 15:23:52,995 INFO HTTP Request: GET http://127.0.0.1:11434/api/tags "HTTP/1.1 200 OK"
+2025-05-15 15:26:15,493 INFO HTTP Request: GET http://127.0.0.1:11434/api/tags "HTTP/1.1 200 OK"
+2025-05-15 15:26:16,779 INFO HTTP Request: GET http://127.0.0.1:11434/api/tags "HTTP/1.1 200 OK"
+2025-05-15 16:55:45,993 INFO HTTP Request: GET http://127.0.0.1:11434/api/tags "HTTP/1.1 200 OK"
+2025-05-15 16:55:51,288 INFO HTTP Request: GET http://127.0.0.1:11434/api/tags "HTTP/1.1 200 OK"
+2025-05-15 16:55:53,550 INFO HTTP Request: GET http://127.0.0.1:11434/api/tags "HTTP/1.1 200 OK"
+2025-05-15 16:55:54,302 INFO HTTP Request: GET http://127.0.0.1:11434/api/tags "HTTP/1.1 200 OK"
+2025-05-15 16:56:04,145 INFO HTTP Request: GET http://127.0.0.1:11434/api/tags "HTTP/1.1 200 OK"
+2025-05-15 16:56:04,705 INFO HTTP Request: GET http://127.0.0.1:11434/api/tags "HTTP/1.1 200 OK"
+2025-05-15 16:56:07,531 INFO HTTP Request: GET http://127.0.0.1:11434/api/tags "HTTP/1.1 200 OK"
+2025-05-15 16:56:08,383 INFO HTTP Request: GET http://127.0.0.1:11434/api/tags "HTTP/1.1 200 OK"
