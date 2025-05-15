@@ -34,6 +34,9 @@ if 'inference_running' not in st.session_state:
 if 'stop_inference' not in st.session_state:
     st.session_state.stop_inference = False
 
+if 'evaluation_result' not in st.session_state:
+    st.session_state.evaluation_result = None
+
 # custom CSS
 st.markdown("""
 <style>
@@ -171,6 +174,30 @@ def query_model_streaming(model_name: str, prompt: str, system_prompt: Optional[
         st.session_state.debug_info.append(error_msg)
         return f"Error: Unable to stream from model. {str(e)}"
 
+# --- Function to evaluate model responses ---
+def evaluate_responses(evaluation_model: str, responses: dict, user_prompt: str, evaluation_prompt: str, temperature: float = 0.7) -> str:
+    try:
+        # Prepare the prompt for evaluation
+        formatted_responses = ""
+        for i, (model_name, response) in enumerate(responses.items(), 1):
+            formatted_responses += f"\n\n--- MODEL {i}: {model_name} ---\n{response}"
+        
+        full_prompt = f"""Original User Prompt: {user_prompt}
+
+The following are responses from different LLM models to this prompt:
+{formatted_responses}
+
+Based on these responses, please provide your evaluation.
+"""
+        
+        # Call the evaluation model
+        st.session_state.debug_info.append(f"Sending evaluation request to {evaluation_model}...")
+        return query_model(evaluation_model, full_prompt, evaluation_prompt, temperature)
+    except Exception as e:
+        error_msg = f"Evaluation exception with {evaluation_model}: {str(e)}"
+        st.session_state.debug_info.append(error_msg)
+        return f"Error: Unable to perform evaluation. {str(e)}"
+
 # --- Sidebar Tabs Navigation ---
 with st.sidebar:
     st.markdown("## LLM Suite")
@@ -262,13 +289,39 @@ with st.sidebar:
             help="Remove any model thought processes from the final response",
         )
         temperature = st.slider("Temperature", min_value=0.0, max_value=2.0, value=0.7, step=0.1, key="temperature")
+        
         st.subheader("System Prompt (Optional)")
         system_prompt = st.text_area("Enter a system prompt", "", key="system_prompt")
+        
+        # --- Evaluation Settings ---
+        st.subheader("Evaluation")
+        base_model_names, models_info = get_available_models()
+        model_names = [model["name"] for model in models_info]
+        
+        if model_names:
+            # Default to the first model if available
+            default_model = model_names[0] if model_names else ""
+            evaluation_model = st.selectbox(
+                "Evaluation Model", 
+                options=model_names,
+                index=0,
+                help="Select a model to evaluate the responses",
+                key="evaluation_model"
+            )
+        else:
+            st.warning("No models available for evaluation")
+            evaluation_model = ""
+
+        evaluation_prompt = st.text_area(
+            "Evaluation Prompt", 
+            "Several LLMs have been queried with the same prompt. Following are their individual responses to the prompt. Please look over the responses as a whole, and determine which response(s) are the most recurring. DO NOT evaluate the prompt on your own, only find which the most common model response.",
+            key="evaluation_prompt"
+        )
+        
         st.subheader("Model Management")
         if st.button("Refresh Available Models", key="refresh_models"):
             st.cache_data.clear()
             st.rerun()
-        base_model_names, models_info = get_available_models()
         if models_info:
             st.success(f"Found {len(models_info)} models across {len(base_model_names)} model families")
 
@@ -276,6 +329,8 @@ with st.sidebar:
 enable_streaming = st.session_state.enable_streaming
 temperature = st.session_state.temperature
 system_prompt = st.session_state.system_prompt
+evaluation_model = st.session_state.get("evaluation_model", "")  
+evaluation_prompt = st.session_state.get("evaluation_prompt", "")
 
 st.header("Enter Your Prompt")
 user_prompt = st.text_area("The same prompt will be sent to all selected models", "")
@@ -365,6 +420,8 @@ if compare_button:
         # Clear previous results
         st.session_state.results = {}
         st.session_state.current_streaming_text = ""
+        # Clear previous evaluation result
+        st.session_state.evaluation_result = None
         
         # Reset stop flag
         st.session_state.stop_inference = False
@@ -399,12 +456,33 @@ if st.session_state.results:
     if error_count > 0:
         st.warning(f"{success_count} successful responses, {error_count} errors")
     
-    # Create download buttons
+    # Create download buttons and add Evaluate button
     results_df = pd.DataFrame({
         "Model": list(st.session_state.results.keys()),
         "Response": list(st.session_state.results.values()),
         "Length": [len(response) for response in st.session_state.results.values()]
     })
+    
+    # Add evaluate button above the download buttons
+    if st.button("Evaluate Responses", key="evaluate_button", use_container_width=True):
+        if evaluation_model:
+            with st.spinner(f"Evaluating responses using {evaluation_model}..."):
+                evaluation_result = evaluate_responses(
+                    evaluation_model, 
+                    st.session_state.results, 
+                    user_prompt, 
+                    evaluation_prompt, 
+                    temperature
+                )
+                st.session_state.evaluation_result = evaluation_result
+        else:
+            st.error("Please select an evaluation model in the Settings tab")
+    
+    # Show evaluation results if available
+    if st.session_state.evaluation_result:
+        st.subheader("Evaluation Results")
+        st.markdown(f"<div class='model-response'>{html.escape(st.session_state.evaluation_result)}</div>", 
+                  unsafe_allow_html=True)
     
     col1, col2 = st.columns(2)
     with col1:
@@ -421,7 +499,8 @@ if st.session_state.results:
         "system_prompt": system_prompt,
         "temperature": temperature,
         "results": st.session_state.results,
-        "response_lengths": {model: len(response) for model, response in st.session_state.results.items()}
+        "response_lengths": {model: len(response) for model, response in st.session_state.results.items()},
+        "evaluation": st.session_state.evaluation_result
     }, indent=2)
     
     with col2:

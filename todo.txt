@@ -1,7 +1,7 @@
 - Update readme
+- Remove evaluate button after evaluation results appears
 
 ADVANCED:
-- Add an 'evaluation model' that looks over all of the responses and judges which response is the most recurring - useful for STEM questions
 - Model management (download, remove, custom gguf models?), list of recommended models for hardware spec? (could be based off of available system VRAM -> all models under x billion parameters. ie. 8GB VRAM -> all models under 8B parameters -> fetch list matching constraints from available ollama models)
 - Model benchmarks: provide tokens/sec & other metrics
 - Config/profile support (w/ configparser?) for model selections, parameters, system prompt, etc. & option to set default config & load on startup. will require lots of edge case checks (ie. if model is selected in config but not downloaded - prompt to download or to remove from config?) 
