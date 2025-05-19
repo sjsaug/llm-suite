@@ -468,7 +468,7 @@ with st.sidebar:
 
         evaluation_prompt = st.text_area(
             "Evaluation Prompt", 
-            "Please evaluate the following responses from various LLMs and determine which is the most accurate.",
+            "Several LLMs have been queried with the same prompt. Following are their individual responses to the prompt. Please look over the responses as a whole, and determine which response(s) are the most recurring. DO NOT evaluate the prompt on your own, only find which the most common model response.",
             key="evaluation_prompt"
         )
 
@@ -610,20 +610,21 @@ if st.session_state.results:
         "Length": [len(response) for response in st.session_state.results.values()]
     })
     
-    # Add evaluate button above the download buttons
-    if st.button("Evaluate Responses", key="evaluate_button", use_container_width=True):
-        if evaluation_model:
-            with st.spinner(f"Evaluating responses using {evaluation_model}..."):
-                evaluation_result = evaluate_responses(
-                    evaluation_model, 
-                    st.session_state.results, 
-                    user_prompt, 
-                    evaluation_prompt, 
-                    temperature
-                )
-                st.session_state.evaluation_result = evaluation_result
-        else:
-            st.error("Please select an evaluation model in the Settings tab")
+    # Only show evaluate button if evaluation result is not present
+    if not st.session_state.evaluation_result:
+        if st.button("Evaluate Responses", key="evaluate_button", use_container_width=True):
+            if evaluation_model:
+                with st.spinner(f"Evaluating responses using {evaluation_model}..."):
+                    evaluation_result = evaluate_responses(
+                        evaluation_model, 
+                        st.session_state.results, 
+                        user_prompt, 
+                        evaluation_prompt, 
+                        temperature
+                    )
+                    st.session_state.evaluation_result = evaluation_result
+            else:
+                st.error("Please select an evaluation model in the Settings tab")
     
     # Show evaluation results if available
     if st.session_state.evaluation_result:
