@@ -47,6 +47,45 @@ if 'download_status' not in st.session_state:
 if 'remove_status' not in st.session_state:
     st.session_state.remove_status = None
 
+# Define helper functions first before using them 
+CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".llm_suite_profiles.ini")
+
+def load_profiles():
+    config = configparser.ConfigParser()
+    if os.path.exists(CONFIG_PATH):
+        config.read(CONFIG_PATH)
+    return config
+
+def save_profiles(config):
+    with open(CONFIG_PATH, "w") as f:
+        config.write(f)
+
+# --- Auto-load default profile on startup - MOVED TO TOP ---
+# This needs to be before any widgets are created
+if not st.session_state.get("current_session_loaded", False):
+    config = load_profiles()
+    default_profile = config["DEFAULT"].get("default_profile", "") if "DEFAULT" in config else ""
+    
+    if default_profile and default_profile in config:
+        profile = config[default_profile]
+        loaded_models = profile.get("selected_models", "")
+        loaded_models = [m for m in loaded_models.split(",") if m]
+        
+        # Store profile settings in session state
+        st.session_state["enable_streaming_value"] = profile.getboolean("enable_streaming", True)
+        st.session_state["temperature_value"] = float(profile.get("temperature", 0.7))
+        st.session_state["system_prompt_value"] = profile.get("system_prompt", "")
+        st.session_state["evaluation_model_value"] = profile.get("evaluation_model", "")
+        st.session_state["evaluation_prompt_value"] = profile.get("evaluation_prompt", "")
+        st.session_state["remove_think_blocks_value"] = profile.getboolean("remove_think_blocks", False)
+        st.session_state["profile_selected_models"] = loaded_models
+        
+        # Set flag that profile was auto-loaded
+        st.session_state["default_profile_autoloaded"] = default_profile
+    
+    # Mark as loaded to prevent reloading
+    st.session_state["current_session_loaded"] = True
+
 # custom CSS
 st.markdown("""
 <style>
@@ -255,18 +294,6 @@ Based on these responses, please provide your evaluation.
         st.session_state.debug_info.append(error_msg)
         return f"Error: Unable to perform evaluation. {str(e)}"
 
-CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".llm_suite_profiles.ini")
-
-def load_profiles():
-    config = configparser.ConfigParser()
-    if os.path.exists(CONFIG_PATH):
-        config.read(CONFIG_PATH)
-    return config
-
-def save_profiles(config):
-    with open(CONFIG_PATH, "w") as f:
-        config.write(f)
-
 def get_installed_model_names():
     _, models_info = get_available_models()
     return set(model["name"] for model in models_info)
@@ -301,7 +328,8 @@ with st.sidebar:
         # Models to pre-select from profile (if any)
         models_to_preselect = st.session_state.get("profile_selected_models", [])
         
-        select_all = st.checkbox("Select All Models", key="select_all", value=False)
+        # Fixed key name to avoid duplicates
+        select_all = st.checkbox("Select All Models", key="select_all_models", value=False)
         if select_all:
             selected_models = [model["name"] for model in models_info]
         else:
@@ -590,9 +618,13 @@ with st.sidebar:
                     st.success(f"Profile '{selected_profile}' deleted.")
                     st.rerun()
 
-        # Show current default
+        # Show current default and auto-load message
         if default_profile:
             st.info(f"Default profile: {default_profile}")
+            
+            # Show message if default profile was auto-loaded in this session
+            if st.session_state.get("default_profile_autoloaded") == default_profile:
+                st.success(f"Default profile '{default_profile}' was loaded automatically on startup.")
 
         # Save current settings as profile
         st.markdown("#### Create New Profile")
@@ -613,31 +645,6 @@ with st.sidebar:
             save_profiles(config)
             st.success(f"Profile '{new_profile_name}' saved.")
             st.rerun()
-
-# --- Auto-load default profile on startup ---
-if "profile_loaded" not in st.session_state:
-    config = load_profiles()
-    default_profile = config["DEFAULT"].get("default_profile", "") if "DEFAULT" in config else ""
-    if default_profile and default_profile in config:
-        profile = config[default_profile]
-        loaded_models = profile.get("selected_models", "")
-        loaded_models = [m for m in loaded_models.split(",") if m]
-        installed_models = get_installed_model_names()
-        missing_models = [m for m in loaded_models if m not in installed_models]
-        if missing_models:
-            prompt_missing_models(missing_models)
-        
-        # Store these directly with _value suffix to avoid widget conflict
-        st.session_state["enable_streaming_value"] = profile.getboolean("enable_streaming", True)
-        st.session_state["temperature_value"] = float(profile.get("temperature", 0.7))
-        st.session_state["system_prompt_value"] = profile.get("system_prompt", "")
-        st.session_state["evaluation_model_value"] = profile.get("evaluation_model", "")
-        st.session_state["evaluation_prompt_value"] = profile.get("evaluation_prompt", "")
-        st.session_state["remove_think_blocks_value"] = profile.getboolean("remove_think_blocks", False)
-        
-        # Just store the model names to select, don't try to set checkbox states directly
-        st.session_state["profile_selected_models"] = loaded_models
-        st.session_state["profile_loaded"] = True
 
 # --- Main content area ---
 st.header("Enter Your Prompt")
