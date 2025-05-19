@@ -1,6 +1,7 @@
 - Update readme
+- 'Attach files' option (with comprehensive file handling in the prompt context)
 
 ADVANCED:
-- Model management (download, remove, custom gguf models?), list of recommended models for hardware spec? (could be based off of available system VRAM -> all models under x billion parameters. ie. 8GB VRAM -> all models under 8B parameters -> fetch list matching constraints from available ollama models)
+- Model management tab: recommended model size for hardware spec (based off of available system VRAM with the general rule of maximum 1.5B parameters per 1GB VRAM ie. a system with 8GB VRAM would recommend to use models under 8B parameters) 
 - Model benchmarks: provide tokens/sec & other metrics
-- Config/profile support (w/ configparser?) for model selections, parameters, system prompt, etc. & option to set default config & load on startup. will require lots of edge case checks (ie. if model is selected in config but not downloaded - prompt to download or to remove from config?) 
+- Conversations? Context?

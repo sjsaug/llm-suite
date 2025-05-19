@@ -10,6 +10,13 @@ LLM Suite allows you compare responses of various local LLMs.
 - Customize temperature and system prompt
 - View responses side-by-side or stacked
 - Export results as CSV or JSON
+- Download and remove models directly from the interface
+- Save and load parameter profiles for quick configurations
+- Stream responses in real-time to see generation as it happens
+- Evaluate responses using another model to identify patterns
+- Remove thinking blocks from model outputs
+- Set default profiles for automatic loading on startup
+- Debug information for troubleshooting model interactions
 
 ## Setup Instructions
 
@@ -55,10 +62,18 @@ streamlit run main.py
 - Adjust the temperature slider to control randomness in responses
 - Use the system prompt to set the context or personality for the models
 - Switch between "Side by Side" and "Stacked" tabs to view responses in different layouts
-- Use the export options to save your comparisons
+- Create and save profiles to easily switch between different configurations
+- Enable streaming to see model responses as they're generated
+- Use the evaluation feature to compare responses across multiple models
+- Download new models directly from the "Model Management" tab
+- Set a default profile to automatically load your preferred settings on startup
+- Use the "Stop Inference" button to cancel generation if it's taking too long
+- Enable "Remove think blocks" to clean up thought process markers in outputs
 
 ## Troubleshooting
 
 - If no models appear, make sure Ollama is running (`ollama serve` in terminal)
 - If responses take too long, try using fewer models at once or reduce the complexity of your prompt. This is largely hardware based.
 - If you get errors, check that your Ollama API is accessible at http://localhost:11434
+- Check the "Debug Information" expander after running a comparison to see detailed logs
+- If models from your profile aren't visible, they might need to be downloaded first

@@ -622,10 +622,6 @@ with st.sidebar:
         if default_profile:
             st.info(f"Default profile: {default_profile}")
             
-            # Show message if default profile was auto-loaded in this session
-            if st.session_state.get("default_profile_autoloaded") == default_profile:
-                st.success(f"Default profile '{default_profile}' was loaded automatically on startup.")
-
         # Save current settings as profile
         st.markdown("#### Create New Profile")
         new_profile_name = st.text_input("Profile name", key="profile_name_input")
