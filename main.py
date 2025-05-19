@@ -7,6 +7,8 @@ import re
 import requests
 import subprocess
 import json
+import configparser
+import os
 
 # st page config
 st.set_page_config(
@@ -253,6 +255,28 @@ Based on these responses, please provide your evaluation.
         st.session_state.debug_info.append(error_msg)
         return f"Error: Unable to perform evaluation. {str(e)}"
 
+CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".llm_suite_profiles.ini")
+
+def load_profiles():
+    config = configparser.ConfigParser()
+    if os.path.exists(CONFIG_PATH):
+        config.read(CONFIG_PATH)
+    return config
+
+def save_profiles(config):
+    with open(CONFIG_PATH, "w") as f:
+        config.write(f)
+
+def get_installed_model_names():
+    _, models_info = get_available_models()
+    return set(model["name"] for model in models_info)
+
+def prompt_missing_models(missing_models):
+    st.warning(
+        f"The following models in the loaded profile are not installed: {', '.join(missing_models)}. "
+        "Please download them or remove them from the profile."
+    )
+
 # --- Sidebar Tabs Navigation ---
 with st.sidebar:
     st.markdown("## LLM Suite")
@@ -273,6 +297,10 @@ with st.sidebar:
             if base_name not in models_by_family:
                 models_by_family[base_name] = []
             models_by_family[base_name].append(model["name"])
+        
+        # Models to pre-select from profile (if any)
+        models_to_preselect = st.session_state.get("profile_selected_models", [])
+        
         select_all = st.checkbox("Select All Models", key="select_all", value=False)
         if select_all:
             selected_models = [model["name"] for model in models_info]
@@ -293,14 +321,23 @@ with st.sidebar:
                         """
                         if "format" in model_info:
                             help_text += f"\n{model_info['base_name']}:{model_info['version']}"
-                        if st.checkbox(f"{model_name}", key=f"model_{model_name}", help=help_text):
+                        
+                        # If model should be pre-selected based on profile
+                        preselect = model_name in models_to_preselect
+                        
+                        if st.checkbox(f"{model_name}", key=f"model_{model_name}", 
+                                      help=help_text, value=preselect):
                             selected_models.append(model_name)
                 else:
                     with st.expander(f"{base_name} ({len(versions)} versions)", expanded=True):
+                        # Check if all versions in this family should be selected
+                        family_models_in_profile = [m for m in models_to_preselect if m in versions]
+                        all_family_selected = len(family_models_in_profile) == len(versions)
+                        
                         select_all_family = st.checkbox(
                             f"Select all {base_name} versions",
                             key=f"select_all_{base_name}",
-                            value=False
+                            value=all_family_selected
                         )
                         if select_all_family:
                             # If select all family is checked, add all versions
@@ -320,7 +357,12 @@ with st.sidebar:
                                 """
                                 if "format" in model_info:
                                     help_text += f"\n{model_info['base_name']}:{model_info['version']}"
-                                if st.checkbox(f"{version}", key=f"model_{version}", help=help_text):
+                                
+                                # Pre-select models from loaded profile
+                                preselect = version in models_to_preselect
+                                
+                                if st.checkbox(f"{version}", key=f"model_{version}", 
+                                              help=help_text, value=preselect):
                                     selected_models.append(version)
                                 elif version in selected_models:
                                     selected_models.remove(version)
@@ -434,18 +476,34 @@ with st.sidebar:
     # --- Settings Tab ---
     with sidebar_tabs[2]:
         st.subheader("Parameters")
-        enable_streaming = st.checkbox("Enable streaming", value=True, 
-                                      help="Show responses as they are generated. You'll see the text being generated in real-time.",
-                                      key="enable_streaming")
+        # Use profile values if available for widget defaults
+        enable_streaming = st.checkbox(
+            "Enable streaming", 
+            value=st.session_state.get("enable_streaming_value", True), 
+            help="Show responses as they are generated. You'll see the text being generated in real-time.",
+            key="enable_streaming"
+        )
         remove_think_blocks_setting = st.checkbox(
             "Remove think blocks",
-            value=False,
+            value=st.session_state.get("remove_think_blocks_value", False),
             help="Remove any model thought processes from the final response",
+            key="remove_think_blocks"
         )
-        temperature = st.slider("Temperature", min_value=0.0, max_value=2.0, value=0.7, step=0.1, key="temperature")
+        temperature = st.slider(
+            "Temperature", 
+            min_value=0.0, 
+            max_value=2.0, 
+            value=st.session_state.get("temperature_value", 0.7), 
+            step=0.1, 
+            key="temperature"
+        )
         
         st.subheader("System Prompt (Optional)")
-        system_prompt = st.text_area("Enter a system prompt", "", key="system_prompt")
+        system_prompt = st.text_area(
+            "Enter a system prompt", 
+            value=st.session_state.get("system_prompt_value", ""), 
+            key="system_prompt"
+        )
         
         # --- Evaluation Settings ---
         st.subheader("Evaluation")
@@ -453,12 +511,18 @@ with st.sidebar:
         model_names = [model["name"] for model in models_info]
         
         if model_names:
-            # Default to the first model if available
-            default_model = model_names[0] if model_names else ""
+            # Default to the first model if available, but use profile value if present
+            default_index = 0
+            if "evaluation_model_value" in st.session_state:
+                try:
+                    default_index = model_names.index(st.session_state["evaluation_model_value"])
+                except ValueError:
+                    default_index = 0
+                    
             evaluation_model = st.selectbox(
                 "Evaluation Model", 
                 options=model_names,
-                index=0,
+                index=default_index,
                 help="Select a model to evaluate the responses",
                 key="evaluation_model"
             )
@@ -468,17 +532,114 @@ with st.sidebar:
 
         evaluation_prompt = st.text_area(
             "Evaluation Prompt", 
-            "Several LLMs have been queried with the same prompt. Following are their individual responses to the prompt. Please look over the responses as a whole, and determine which response(s) are the most recurring. DO NOT evaluate the prompt on your own, only find which the most common model response.",
+            value=st.session_state.get("evaluation_prompt_value", "Several LLMs have been queried with the same prompt. Following are their individual responses to the prompt. Please look over the responses as a whole, and determine which response(s) are the most recurring. DO NOT evaluate the prompt on your own, only find which the most common model response."),
             key="evaluation_prompt"
         )
 
-# Use session state variables
-enable_streaming = st.session_state.enable_streaming
-temperature = st.session_state.temperature
-system_prompt = st.session_state.system_prompt
-evaluation_model = st.session_state.get("evaluation_model", "")  
-evaluation_prompt = st.session_state.get("evaluation_prompt", "")
+        # --- Profile/Config Management ---
+        st.markdown("### Config / Profile Management")
+        config = load_profiles()
+        profile_names = [s for s in config.sections() if s != "DEFAULT"]
+        default_profile = config["DEFAULT"].get("default_profile", "") if "DEFAULT" in config else ""
 
+        # Select profile to load
+        selected_profile = st.selectbox(
+            "Select profile to load",
+            options=[""] + profile_names,
+            index=profile_names.index(default_profile) + 1 if default_profile in profile_names else 0,
+            key="profile_select"
+        )
+
+        # Profile action buttons (Load, Set Default, Delete) grouped together
+        if selected_profile:
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                if st.button("Load Profile", key="load_profile_button"):
+                    profile = config[selected_profile]
+                    loaded_models = profile.get("selected_models", "")
+                    loaded_models = [m for m in loaded_models.split(",") if m]
+                    installed_models = get_installed_model_names()
+                    missing_models = [m for m in loaded_models if m not in installed_models]
+                    if missing_models:
+                        prompt_missing_models(missing_models)
+                    
+                    # Store in session state with _value suffix
+                    st.session_state["enable_streaming_value"] = profile.getboolean("enable_streaming", True)
+                    st.session_state["temperature_value"] = float(profile.get("temperature", 0.7))
+                    st.session_state["system_prompt_value"] = profile.get("system_prompt", "")
+                    st.session_state["evaluation_model_value"] = profile.get("evaluation_model", "")
+                    st.session_state["evaluation_prompt_value"] = profile.get("evaluation_prompt", "")
+                    st.session_state["remove_think_blocks_value"] = profile.getboolean("remove_think_blocks", False)
+                    
+                    # Just store the model names to select, don't try to set checkbox states directly
+                    st.session_state["profile_selected_models"] = loaded_models
+                    st.rerun()
+            
+            with col2:
+                if st.button("Set as Default", key="set_default_profile"):
+                    if "DEFAULT" not in config:
+                        config["DEFAULT"] = {}
+                    config["DEFAULT"]["default_profile"] = selected_profile
+                    save_profiles(config)
+                    st.success(f"Profile '{selected_profile}' set as default.")
+            
+            with col3:
+                if st.button("Delete Profile", key="delete_profile_button"):
+                    config.remove_section(selected_profile)
+                    save_profiles(config)
+                    st.success(f"Profile '{selected_profile}' deleted.")
+                    st.rerun()
+
+        # Show current default
+        if default_profile:
+            st.info(f"Default profile: {default_profile}")
+
+        # Save current settings as profile
+        st.markdown("#### Create New Profile")
+        new_profile_name = st.text_input("Profile name", key="profile_name_input")
+        if st.button("Save Profile", key="save_profile_button") and new_profile_name:
+            # Get current selected models
+            current_selected_models = selected_models[:]  # Make a copy
+            
+            config[new_profile_name] = {
+                "selected_models": ",".join(current_selected_models),
+                "enable_streaming": str(st.session_state.get("enable_streaming", True)),
+                "temperature": str(st.session_state.get("temperature", 0.7)),
+                "system_prompt": st.session_state.get("system_prompt", ""),
+                "evaluation_model": st.session_state.get("evaluation_model", ""),
+                "evaluation_prompt": st.session_state.get("evaluation_prompt", ""),
+                "remove_think_blocks": str(st.session_state.get("remove_think_blocks", False)),
+            }
+            save_profiles(config)
+            st.success(f"Profile '{new_profile_name}' saved.")
+            st.rerun()
+
+# --- Auto-load default profile on startup ---
+if "profile_loaded" not in st.session_state:
+    config = load_profiles()
+    default_profile = config["DEFAULT"].get("default_profile", "") if "DEFAULT" in config else ""
+    if default_profile and default_profile in config:
+        profile = config[default_profile]
+        loaded_models = profile.get("selected_models", "")
+        loaded_models = [m for m in loaded_models.split(",") if m]
+        installed_models = get_installed_model_names()
+        missing_models = [m for m in loaded_models if m not in installed_models]
+        if missing_models:
+            prompt_missing_models(missing_models)
+        
+        # Store these directly with _value suffix to avoid widget conflict
+        st.session_state["enable_streaming_value"] = profile.getboolean("enable_streaming", True)
+        st.session_state["temperature_value"] = float(profile.get("temperature", 0.7))
+        st.session_state["system_prompt_value"] = profile.get("system_prompt", "")
+        st.session_state["evaluation_model_value"] = profile.get("evaluation_model", "")
+        st.session_state["evaluation_prompt_value"] = profile.get("evaluation_prompt", "")
+        st.session_state["remove_think_blocks_value"] = profile.getboolean("remove_think_blocks", False)
+        
+        # Just store the model names to select, don't try to set checkbox states directly
+        st.session_state["profile_selected_models"] = loaded_models
+        st.session_state["profile_loaded"] = True
+
+# --- Main content area ---
 st.header("Enter Your Prompt")
 user_prompt = st.text_area("The same prompt will be sent to all selected models", "")
 
@@ -688,7 +849,7 @@ if st.session_state.results:
                     if remove_think_blocks_setting:
                         response = remove_think_blocks(response)
                     st.subheader(f"{model_name} ({len(response)} chars)")
-                    st.markdown(f"<div class='model-response'>{html.escape(response)}</div>", 
+                    st.markdown(f"<div class='model-response'>{html.escape(response)}</div>",
                                unsafe_allow_html=True)
                 if i + 1 < len(models_with_results):
                     with row_cols[1]:

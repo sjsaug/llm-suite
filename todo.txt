@@ -1,5 +1,4 @@
 - Update readme
-- Remove evaluate button after evaluation results appears
 
 ADVANCED:
 - Model management (download, remove, custom gguf models?), list of recommended models for hardware spec? (could be based off of available system VRAM -> all models under x billion parameters. ie. 8GB VRAM -> all models under 8B parameters -> fetch list matching constraints from available ollama models)
