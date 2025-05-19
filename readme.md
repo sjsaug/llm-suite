@@ -1,7 +1,7 @@
 # LLM Suite
 
 LLM Suite allows you compare responses of various local LLMs.
-![image](https://github.com/user-attachments/assets/741253c7-fbd6-4dfc-a012-213d96a1e9ff)
+![image](https://github.com/user-attachments/assets/e4bcc316-8147-4025-a5c8-c2fd782ad396)
 
 
 ## Features
