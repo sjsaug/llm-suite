@@ -9,6 +9,9 @@ import subprocess
 import json
 import configparser
 import os
+import time
+from dataclasses import dataclass, field, asdict
+from typing import Dict, List, Any
 
 # st page config
 st.set_page_config(
@@ -41,11 +44,82 @@ if 'stop_inference' not in st.session_state:
 if 'evaluation_result' not in st.session_state:
     st.session_state.evaluation_result = None
 
+if 'performance_stats' not in st.session_state:
+    st.session_state.performance_stats = {}
+
 if 'download_status' not in st.session_state:
     st.session_state.download_status = None
 
 if 'remove_status' not in st.session_state:
     st.session_state.remove_status = None
+
+# --- Performance Stats Data Class ---
+@dataclass
+class PerformanceStats:
+    """Holds performance metrics for a model inference run."""
+    model_name: str = ""
+    total_tokens: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    time_to_first_token: float = 0.0  # seconds
+    time_to_completion: float = 0.0   # seconds from first token to last
+    total_time: float = 0.0           # total inference time
+    tokens_per_second: float = 0.0    # completion tokens / time_to_completion
+    load_duration_ms: float = 0.0     # model load time (if available)
+    eval_duration_ms: float = 0.0     # evaluation duration (if available)
+    
+    def calculate_tokens_per_second(self):
+        """Calculate tokens per second based on completion time."""
+        if self.time_to_completion > 0 and self.completion_tokens > 0:
+            self.tokens_per_second = self.completion_tokens / self.time_to_completion
+        elif self.total_time > 0 and self.completion_tokens > 0:
+            self.tokens_per_second = self.completion_tokens / self.total_time
+        return self.tokens_per_second
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert stats to dictionary for display/export."""
+        return asdict(self)
+
+
+def format_performance_stats(stats: PerformanceStats) -> str:
+    """Format performance stats for display."""
+    lines = []
+    if stats.total_time > 0:
+        lines.append(f"Total Time: {stats.total_time:.2f}s")
+    if stats.time_to_first_token > 0:
+        lines.append(f"Time to First Token: {stats.time_to_first_token:.3f}s")
+    if stats.time_to_completion > 0:
+        lines.append(f"Generation Time: {stats.time_to_completion:.2f}s")
+    if stats.completion_tokens > 0:
+        lines.append(f"Tokens Generated: {stats.completion_tokens}")
+    if stats.tokens_per_second > 0:
+        lines.append(f"Speed: {stats.tokens_per_second:.1f} tokens/sec")
+    if stats.load_duration_ms > 0:
+        lines.append(f"Model Loading Time: {stats.load_duration_ms:.0f}ms")
+    if stats.eval_duration_ms > 0:
+        lines.append(f"Evaluation Duration: {stats.eval_duration_ms:.0f}ms")
+    return " | ".join(lines) if lines else "No stats available"
+
+
+def create_stats_dataframe(all_stats: Dict[str, PerformanceStats]) -> pd.DataFrame:
+    """Create a pandas DataFrame from performance stats for comparison."""
+    if not all_stats:
+        return pd.DataFrame()
+    
+    data = []
+    for model_name, stats in all_stats.items():
+        data.append({
+            "Model": model_name,
+            "Total Time (seconds)": round(stats.total_time, 2),
+            "Time to First Token (seconds)": round(stats.time_to_first_token, 3),
+            "Generation Time (seconds)": round(stats.time_to_completion, 2),
+            "Tokens Generated": stats.completion_tokens,
+            "Tokens per Second": round(stats.tokens_per_second, 1),
+            "Model Loading Time (ms)": round(stats.load_duration_ms, 0),
+        })
+    
+    return pd.DataFrame(data)
+
 
 # Define helper functions first before using them 
 CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".llm_suite_profiles.ini")
@@ -201,7 +275,15 @@ def remove_model(model_name):
         return False, f"Error: {str(e)}"
 
 # non-streaming inference function
-def query_model(model_name: str, prompt: str, system_prompt: Optional[str] = None, temperature: float = 0.7) -> str:
+def query_model(model_name: str, prompt: str, system_prompt: Optional[str] = None, 
+                temperature: float = 0.7) -> tuple[str, PerformanceStats]:
+    """
+    Query a model without streaming and return response with performance stats.
+    Returns: (response_text, PerformanceStats)
+    """
+    stats = PerformanceStats(model_name=model_name)
+    start_time = time.time()
+    
     try:
         # prepare parameters
         params = {
@@ -218,16 +300,56 @@ def query_model(model_name: str, prompt: str, system_prompt: Optional[str] = Non
         st.session_state.debug_info.append(f"Sending request to {model_name}...")
         response = ollama.generate(**params)
         
-        return response.response
+        # Calculate timing
+        end_time = time.time()
+        stats.total_time = end_time - start_time
+        
+        # Extract token counts and timing from response if available
+        stats = extract_ollama_stats(response, stats)
+        stats.calculate_tokens_per_second()
+        
+        return response.response, stats
     except Exception as e:
         error_msg = f"Exception with {model_name}: {str(e)}"
         st.session_state.debug_info.append(error_msg)
-        return f"Error: Unable to query model. {str(e)}"
+        stats.total_time = time.time() - start_time
+        return f"Error: Unable to query model. {str(e)}", stats
+
+
+def extract_ollama_stats(response, stats: PerformanceStats) -> PerformanceStats:
+    """Extract performance statistics from Ollama response object."""
+    try:
+        # Ollama responses include these timing fields (in nanoseconds)
+        if hasattr(response, 'total_duration'):
+            stats.total_time = response.total_duration / 1e9  # Convert ns to seconds
+        if hasattr(response, 'load_duration'):
+            stats.load_duration_ms = response.load_duration / 1e6  # Convert ns to ms
+        if hasattr(response, 'eval_duration'):
+            stats.eval_duration_ms = response.eval_duration / 1e6  # Convert ns to ms
+            # Time to completion is essentially eval_duration for non-streaming
+            stats.time_to_completion = response.eval_duration / 1e9
+        if hasattr(response, 'prompt_eval_count'):
+            stats.prompt_tokens = response.prompt_eval_count or 0
+        if hasattr(response, 'eval_count'):
+            stats.completion_tokens = response.eval_count or 0
+            stats.total_tokens = stats.prompt_tokens + stats.completion_tokens
+    except Exception as e:
+        st.session_state.debug_info.append(f"Error extracting stats: {str(e)}")
+    return stats
 
 # streaming inference function
 def query_model_streaming(model_name: str, prompt: str, system_prompt: Optional[str] = None, 
                          temperature: float = 0.7, progress_container=None, 
-                         streaming_display=None):
+                         streaming_display=None) -> tuple[str, PerformanceStats]:
+    """
+    Query a model with streaming and return response with performance stats.
+    Returns: (response_text, PerformanceStats)
+    """
+    stats = PerformanceStats(model_name=model_name)
+    start_time = time.time()
+    first_token_time = None
+    token_count = 0
+    
     try:
         # prepare parameters
         params = {
@@ -243,6 +365,7 @@ def query_model_streaming(model_name: str, prompt: str, system_prompt: Optional[
         
         # Initialize response text
         full_response = ""
+        last_chunk_data = None
         
         # Stream the response
         for chunk in ollama.generate(**params):
@@ -252,7 +375,14 @@ def query_model_streaming(model_name: str, prompt: str, system_prompt: Optional[
                 
             if chunk and 'response' in chunk:
                 text_chunk = chunk['response']
+                
+                # Track first token time
+                if first_token_time is None and text_chunk:
+                    first_token_time = time.time()
+                    stats.time_to_first_token = first_token_time - start_time
+                
                 full_response += text_chunk
+                token_count += 1  # Approximate: count chunks as tokens
                 
                 # Update the streaming display with current text
                 if streaming_display:
@@ -262,16 +392,64 @@ def query_model_streaming(model_name: str, prompt: str, system_prompt: Optional[
                 
                 # Update the progress text and length counter
                 if progress_container:
-                    progress_container.markdown(f"**Model:** {model_name} | Response length: {len(full_response)} characters")
+                    elapsed = time.time() - start_time
+                    current_tps = token_count / elapsed if elapsed > 0 else 0
+                    progress_container.markdown(
+                        f"**Model:** {model_name} | "
+                        f"Length: {len(full_response)} chars | "
+                        f"~{current_tps:.1f} tokens/sec"
+                    )
+            
+            # Keep track of the last chunk for final stats
+            last_chunk_data = chunk
         
-        return full_response
+        # Calculate final timing
+        end_time = time.time()
+        stats.total_time = end_time - start_time
+        
+        if first_token_time:
+            stats.time_to_completion = end_time - first_token_time
+        
+        # Extract final stats from the last chunk (Ollama sends stats in final chunk)
+        if last_chunk_data:
+            stats = extract_streaming_final_stats(last_chunk_data, stats)
+        
+        # If we couldn't get token count from response, use our approximation
+        if stats.completion_tokens == 0:
+            stats.completion_tokens = token_count
+        
+        stats.calculate_tokens_per_second()
+        
+        return full_response, stats
     except Exception as e:
         error_msg = f"Streaming exception with {model_name}: {str(e)}"
         st.session_state.debug_info.append(error_msg)
-        return f"Error: Unable to stream from model. {str(e)}"
+        stats.total_time = time.time() - start_time
+        return f"Error: Unable to stream from model. {str(e)}", stats
+
+
+def extract_streaming_final_stats(chunk_data: dict, stats: PerformanceStats) -> PerformanceStats:
+    """Extract performance statistics from the final streaming chunk."""
+    try:
+        # The final chunk in streaming contains the full stats
+        if 'total_duration' in chunk_data:
+            stats.total_time = chunk_data['total_duration'] / 1e9
+        if 'load_duration' in chunk_data:
+            stats.load_duration_ms = chunk_data['load_duration'] / 1e6
+        if 'eval_duration' in chunk_data:
+            stats.eval_duration_ms = chunk_data['eval_duration'] / 1e6
+        if 'prompt_eval_count' in chunk_data:
+            stats.prompt_tokens = chunk_data['prompt_eval_count'] or 0
+        if 'eval_count' in chunk_data:
+            stats.completion_tokens = chunk_data['eval_count'] or 0
+            stats.total_tokens = stats.prompt_tokens + stats.completion_tokens
+    except Exception as e:
+        st.session_state.debug_info.append(f"Error extracting streaming stats: {str(e)}")
+    return stats
 
 # --- Function to evaluate model responses ---
 def evaluate_responses(evaluation_model: str, responses: dict, user_prompt: str, evaluation_prompt: str, temperature: float = 0.7) -> str:
+    """Evaluate model responses using a specified evaluation model."""
     try:
         # Prepare the prompt for evaluation
         formatted_responses = ""
@@ -286,9 +464,10 @@ The following are responses from different LLM models to this prompt:
 Based on these responses, please provide your evaluation.
 """
         
-        # Call the evaluation model
+        # Call the evaluation model (query_model now returns tuple)
         st.session_state.debug_info.append(f"Sending evaluation request to {evaluation_model}...")
-        return query_model(evaluation_model, full_prompt, evaluation_prompt, temperature)
+        result, _ = query_model(evaluation_model, full_prompt, evaluation_prompt, temperature)
+        return result
     except Exception as e:
         error_msg = f"Evaluation exception with {evaluation_model}: {str(e)}"
         st.session_state.debug_info.append(error_msg)
@@ -661,9 +840,13 @@ streaming_section = st.empty()
 
 # Define the model processing function
 def process_models(selected_models):
+    """Process all selected models and collect responses with performance stats."""
     # Reset debug info for this run
     st.session_state.debug_info = []
     st.session_state.debug_info.append(f"Starting comparison with {len(selected_models)} models")
+    
+    # Reset performance stats
+    st.session_state.performance_stats = {}
     
     # Set up streaming if enabled
     streaming_display = streaming_section.empty() if enable_streaming else None
@@ -678,13 +861,13 @@ def process_models(selected_models):
         try:
             if enable_streaming:
                 # Display progress
-                progress_container.markdown(f"**Model {i+1}/{len(selected_models)}:** {model} | Response length: 0 characters")
+                progress_container.markdown(f"**Model {i+1}/{len(selected_models)}:** {model} | Starting...")
                 progress_bar.progress((i) / len(selected_models))
                 
                 # Reset streaming display for next model
                 st.session_state.current_streaming_text = ""
                 
-                response = query_model_streaming(
+                response, stats = query_model_streaming(
                     model, 
                     user_prompt, 
                     system_prompt, 
@@ -696,14 +879,23 @@ def process_models(selected_models):
                 # Show processing message when not streaming
                 progress_container.markdown(f"**Generating {i+1}/{len(selected_models)}:** {model}")
                 progress_bar.progress((i) / len(selected_models))
-                response = query_model(model, user_prompt, system_prompt, temperature)
+                response, stats = query_model(model, user_prompt, system_prompt, temperature)
             
             st.session_state.results[model] = response
+            st.session_state.performance_stats[model] = stats
             progress_bar.progress((i + 1) / len(selected_models))
+            
+            # Log performance stats
+            st.session_state.debug_info.append(
+                f"{model}: {stats.completion_tokens} tokens in {stats.total_time:.2f}s "
+                f"({stats.tokens_per_second:.1f} tok/s)"
+            )
             
         except Exception as e:
             st.session_state.debug_info.append(f"Unhandled exception for {model}: {str(e)}")
             st.session_state.results[model] = f"Unhandled error: {str(e)}"
+            # Create empty stats for failed model
+            st.session_state.performance_stats[model] = PerformanceStats(model_name=model)
     
     # Clear progress indicators after completion
     progress_bar.empty()
@@ -731,6 +923,7 @@ if compare_button:
         # Clear previous results
         st.session_state.results = {}
         st.session_state.current_streaming_text = ""
+        st.session_state.performance_stats = {}
         # Clear previous evaluation result
         st.session_state.evaluation_result = None
         
@@ -766,6 +959,122 @@ if st.session_state.results:
     
     if error_count > 0:
         st.warning(f"{success_count} successful responses, {error_count} errors")
+    
+    # --- Performance Stats Section ---
+    if st.session_state.performance_stats:
+        with st.expander("Performance Statistics", expanded=True):
+            stats_df = create_stats_dataframe(st.session_state.performance_stats)
+            if not stats_df.empty:
+                # Display the stats table
+                st.dataframe(
+                    stats_df,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Model": st.column_config.TextColumn("Model", width="medium"),
+                        "Total Time (seconds)": st.column_config.NumberColumn("Total Time (seconds)", format="%.2f"),
+                        "Time to First Token (seconds)": st.column_config.NumberColumn("Time to First Token (seconds)", format="%.3f"),
+                        "Generation Time (seconds)": st.column_config.NumberColumn("Generation Time (seconds)", format="%.2f"),
+                        "Tokens Generated": st.column_config.NumberColumn("Tokens Generated", format="%d"),
+                        "Tokens per Second": st.column_config.NumberColumn("Tokens per Second", format="%.1f"),
+                        "Model Loading Time (ms)": st.column_config.NumberColumn("Model Loading Time (ms)", format="%.0f"),
+                    }
+                )
+                
+                # Export stats table as CSV
+                st.download_button(
+                    label="Export Statistics as CSV",
+                    data=stats_df.to_csv(index=False),
+                    file_name="performance_statistics.csv",
+                    mime="text/csv",
+                    use_container_width=True
+                )
+                
+                # Show performance comparison chart if multiple models
+                if len(st.session_state.performance_stats) > 1:
+                    st.markdown("#### Speed Comparison (Tokens per Second)")
+                    
+                    # Create chart using matplotlib for export capability
+                    import matplotlib.pyplot as plt
+                    import io
+                    
+                    fig, ax = plt.subplots(figsize=(10, 6))
+                    models = stats_df["Model"].tolist()
+                    speeds = stats_df["Tokens per Second"].tolist()
+                    
+                    bars = ax.bar(models, speeds, color='#4CAF50')
+                    ax.set_xlabel('Model')
+                    ax.set_ylabel('Tokens per Second')
+                    ax.set_title('Model Speed Comparison')
+                    
+                    # Rotate x-axis labels if many models
+                    if len(models) > 3:
+                        plt.xticks(rotation=45, ha='right')
+                    
+                    # Add value labels on bars
+                    for bar, speed in zip(bars, speeds):
+                        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.5,
+                               f'{speed:.1f}', ha='center', va='bottom', fontsize=9)
+                    
+                    plt.tight_layout()
+                    st.pyplot(fig)
+                    
+                    # Export chart as PNG
+                    buf = io.BytesIO()
+                    fig.savefig(buf, format='png', dpi=150, bbox_inches='tight')
+                    buf.seek(0)
+                    
+                    st.download_button(
+                        label="Export Speed Chart as PNG",
+                        data=buf,
+                        file_name="speed_comparison_chart.png",
+                        mime="image/png",
+                        use_container_width=True
+                    )
+                    
+                    plt.close(fig)  # Clean up
+                    
+                    # Additional chart: Time comparison
+                    st.markdown("#### Time Comparison")
+                    
+                    fig2, ax2 = plt.subplots(figsize=(10, 6))
+                    
+                    x = range(len(models))
+                    width = 0.35
+                    
+                    total_times = stats_df["Total Time (seconds)"].tolist()
+                    first_token_times = stats_df["Time to First Token (seconds)"].tolist()
+                    
+                    bars1 = ax2.bar([i - width/2 for i in x], total_times, width, label='Total Time', color='#2196F3')
+                    bars2 = ax2.bar([i + width/2 for i in x], first_token_times, width, label='Time to First Token', color='#FF9800')
+                    
+                    ax2.set_xlabel('Model')
+                    ax2.set_ylabel('Time (seconds)')
+                    ax2.set_title('Model Time Comparison')
+                    ax2.set_xticks(x)
+                    ax2.set_xticklabels(models)
+                    ax2.legend()
+                    
+                    if len(models) > 3:
+                        plt.xticks(rotation=45, ha='right')
+                    
+                    plt.tight_layout()
+                    st.pyplot(fig2)
+                    
+                    # Export time chart as PNG
+                    buf2 = io.BytesIO()
+                    fig2.savefig(buf2, format='png', dpi=150, bbox_inches='tight')
+                    buf2.seek(0)
+                    
+                    st.download_button(
+                        label="Export Time Chart as PNG",
+                        data=buf2,
+                        file_name="time_comparison_chart.png",
+                        mime="image/png",
+                        use_container_width=True
+                    )
+                    
+                    plt.close(fig2)  # Clean up
     
     # Create download buttons and add Evaluate button
     results_df = pd.DataFrame({
@@ -812,6 +1121,10 @@ if st.session_state.results:
         "temperature": temperature,
         "results": st.session_state.results,
         "response_lengths": {model: len(response) for model, response in st.session_state.results.items()},
+        "performance_stats": {
+            model: stats.to_dict() 
+            for model, stats in st.session_state.performance_stats.items()
+        } if st.session_state.performance_stats else {},
         "evaluation": st.session_state.evaluation_result
     }, indent=2)
     
@@ -841,6 +1154,10 @@ if st.session_state.results:
             if remove_think_blocks_setting:
                 response = remove_think_blocks(response)
             st.subheader(f"{model_name} ({len(response)} chars)")
+            # Show inline stats
+            if model_name in st.session_state.performance_stats:
+                stats = st.session_state.performance_stats[model_name]
+                st.caption(format_performance_stats(stats))
             st.markdown(f"<div class='model-response'>{html.escape(response)}</div>", 
                        unsafe_allow_html=True)
         else:
@@ -852,6 +1169,10 @@ if st.session_state.results:
                     if remove_think_blocks_setting:
                         response = remove_think_blocks(response)
                     st.subheader(f"{model_name} ({len(response)} chars)")
+                    # Show inline stats
+                    if model_name in st.session_state.performance_stats:
+                        stats = st.session_state.performance_stats[model_name]
+                        st.caption(format_performance_stats(stats))
                     st.markdown(f"<div class='model-response'>{html.escape(response)}</div>",
                                unsafe_allow_html=True)
                 if i + 1 < len(models_with_results):
@@ -861,6 +1182,10 @@ if st.session_state.results:
                         if remove_think_blocks_setting:
                             response = remove_think_blocks(response)
                         st.subheader(f"{model_name} ({len(response)} chars)")
+                        # Show inline stats
+                        if model_name in st.session_state.performance_stats:
+                            stats = st.session_state.performance_stats[model_name]
+                            st.caption(format_performance_stats(stats))
                         st.markdown(f"<div class='model-response'>{html.escape(response)}</div>", 
                                    unsafe_allow_html=True)
     
@@ -869,5 +1194,14 @@ if st.session_state.results:
         for model, response in st.session_state.results.items():
             if remove_think_blocks_setting:
                 response = remove_think_blocks(response)
-            with st.expander(f"{model} ({len(response)} chars)", expanded=True):
+            # Include stats in expander title
+            stats_summary = ""
+            if model in st.session_state.performance_stats:
+                stats = st.session_state.performance_stats[model]
+                if stats.tokens_per_second > 0:
+                    stats_summary = f" | {stats.tokens_per_second:.1f} tok/s"
+            with st.expander(f"{model} ({len(response)} chars{stats_summary})", expanded=True):
+                # Show detailed stats inside expander
+                if model in st.session_state.performance_stats:
+                    st.caption(format_performance_stats(st.session_state.performance_stats[model]))
                 st.markdown(f"<div class='model-response'>{html.escape(response)}</div>", unsafe_allow_html=True)
