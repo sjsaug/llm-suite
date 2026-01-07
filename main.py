@@ -10,6 +10,7 @@ import json
 import configparser
 import os
 import time
+from fpdf import FPDF
 from langchain_core.prompts import ChatPromptTemplate
 from dataclasses import dataclass, field, asdict
 from typing import Dict, List, Any
@@ -473,6 +474,110 @@ Based on these responses, please provide your evaluation.
         error_msg = f"Evaluation exception with {evaluation_model}: {str(e)}"
         st.session_state.debug_info.append(error_msg)
         return f"Error: Unable to perform evaluation. {str(e)}"
+
+def collect_model_ratings():
+    """Collect ratings from session state."""
+    model_ratings = {}
+    if 'results' in st.session_state:
+        for model in st.session_state.results.keys():
+            side_key = f"rating_side_{model}"
+            stacked_key = f"rating_stacked_{model}"
+            
+            side_rating = st.session_state.get(side_key, "Select...")
+            stacked_rating = st.session_state.get(stacked_key, "Select...")
+            
+            final_rating = "N/A"
+            if side_rating != "Select...":
+                final_rating = side_rating
+            elif stacked_rating != "Select...":
+                final_rating = stacked_rating
+                
+            model_ratings[model] = final_rating
+    return model_ratings
+
+class PDFReport(FPDF):
+    def header(self):
+        self.set_font('Helvetica', 'B', 15)
+        self.cell(0, 10, 'LLM Suite Comparison Report', 0, 1, 'C')
+        self.ln(5)
+
+    def footer(self):
+        self.set_y(-15)
+        self.set_font('Helvetica', 'I', 8)
+        self.cell(0, 10, f'Page {self.page_no()}/{{nb}}', 0, 0, 'C')
+
+def generate_pdf_report(user_prompt, system_prompt, results, stats, ratings, evaluation):
+    pdf = PDFReport()
+    pdf.alias_nb_pages()
+    pdf.add_page()
+    
+    # Font settings
+    pdf.set_font("Helvetica", size=12)
+    
+    # Prompt Section
+    pdf.set_font("Helvetica", 'B', 12)
+    pdf.cell(0, 10, "User Prompt:", 0, 1)
+    pdf.set_font("Helvetica", size=11)
+    pdf.multi_cell(0, 6, user_prompt)
+    pdf.ln(5)
+    
+    if system_prompt:
+        pdf.set_font("Helvetica", 'B', 12)
+        pdf.cell(0, 10, "System Prompt:", 0, 1)
+        pdf.set_font("Helvetica", size=11)
+        pdf.multi_cell(0, 6, system_prompt)
+        pdf.ln(5)
+        
+    # Models Section
+    for model, response in results.items():
+        pdf.add_page()
+        pdf.set_font("Helvetica", 'B', 14)
+        pdf.cell(0, 10, f"Model: {model}", 0, 1)
+        
+        # Stats & Accuracy
+        pdf.set_font("Helvetica", 'B', 10)
+        pdf.cell(0, 6, "Performance & Accuracy:", 0, 1)
+        pdf.set_font("Helvetica", size=10)
+        
+        stats_text = "No stats available"
+        if model in stats:
+            s = stats[model]
+            stats_text = f"Time: {s.total_time:.2f}s | Speed: {s.tokens_per_second:.1f} t/s | Tokens: {s.completion_tokens}"
+        
+        rating = ratings.get(model, "N/A")
+        pdf.cell(0, 6, f"{stats_text} | Accuracy: {rating}", 0, 1)
+        pdf.ln(5)
+        
+        # Response
+        pdf.set_font("Helvetica", 'B', 12)
+        pdf.cell(0, 10, "Response:", 0, 1)
+        pdf.set_font("Helvetica", size=10)
+        
+        # Determine encoding or handle unicode issues
+        # FPDF has limitations with some unicode characters.
+        # We can try to replace some common issues or use a compatible font if available.
+        # For simplicity, we'll encode to latin-1 and ignore errors, or replace.
+        try:
+            safe_response = response.encode('latin-1', 'replace').decode('latin-1')
+        except:
+            safe_response = "Error encoding response text for PDF."
+            
+        pdf.multi_cell(0, 5, safe_response)
+        pdf.ln(5)
+
+    # Evaluation Section
+    if evaluation:
+        pdf.add_page()
+        pdf.set_font("Helvetica", 'B', 14)
+        pdf.cell(0, 10, "Evaluation Result", 0, 1)
+        pdf.set_font("Helvetica", size=10)
+        try:
+            safe_eval = evaluation.encode('latin-1', 'replace').decode('latin-1')
+        except:
+            safe_eval = "Error encoding evaluation text."
+        pdf.multi_cell(0, 5, safe_eval)
+        
+    return pdf.output(dest='S')
 
 def get_installed_model_names():
     _, models_info = get_available_models()
@@ -1180,7 +1285,10 @@ if st.session_state.results:
         st.markdown(f"<div class='model-response'>{html.escape(st.session_state.evaluation_result)}</div>", 
                   unsafe_allow_html=True)
     
-    col1, col2 = st.columns(2)
+    # Collect ratings for export
+    current_ratings = collect_model_ratings()
+
+    col1, col2, col3 = st.columns(3)
     with col1:
         st.download_button(
             label="Download as CSV",
@@ -1190,18 +1298,29 @@ if st.session_state.results:
             use_container_width=True
         )
     
-    json_results = json.dumps({
+    # Prepare JSON data with accuracy ratings
+    json_data = {
         "prompt": user_prompt,
         "system_prompt": system_prompt,
         "temperature": temperature,
-        "results": st.session_state.results,
-        "response_lengths": {model: len(response) for model, response in st.session_state.results.items()},
+        "results": [],  # Changing structure slightly to include accuracy per result
         "performance_stats": {
             model: stats.to_dict() 
             for model, stats in st.session_state.performance_stats.items()
         } if st.session_state.performance_stats else {},
         "evaluation": st.session_state.evaluation_result
-    }, indent=2)
+    }
+    
+    # Populate results list with individual objects
+    for model, response in st.session_state.results.items():
+        json_data["results"].append({
+            "model": model,
+            "response": response,
+            "length": len(response),
+            "accuracy": current_ratings.get(model, "N/A")
+        })
+
+    json_results = json.dumps(json_data, indent=2)
     
     with col2:
         st.download_button(
@@ -1211,6 +1330,31 @@ if st.session_state.results:
             mime="application/json",
             use_container_width=True
         )
+
+    # Generate PDF Report
+    try:
+        pdf_bytes = generate_pdf_report(
+            user_prompt,
+            system_prompt,
+            st.session_state.results,
+            st.session_state.performance_stats,
+            current_ratings,
+            st.session_state.evaluation_result
+        )
+        # Using .tobytes() or simply the output from output('S') which is bytearray
+        # FPDF2 output('S') returns bytearray in Python 3
+        pdf_data = bytes(pdf_bytes)
+        
+        with col3:
+            st.download_button(
+                label="Download as PDF",
+                data=pdf_data,
+                file_name="ollama_model_comparison.pdf",
+                mime="application/pdf",
+                use_container_width=True
+            )
+    except Exception as e:
+        st.error(f"Error generating PDF: {e}")
 
     # Tabs for different view modes
     tab1, tab2 = st.tabs(["Side by Side", "Stacked"])
