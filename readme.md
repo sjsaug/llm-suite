@@ -1,5 +1,5 @@
 ## Disclaimer
-**The st UI was mostly vibe coded. I wrote all things pertaining to inference and config management without AI assistance.**
+**The Streamlit UI was written with AI assistance. I wrote all things pertaining to inference and config management without AI assistance.**
 
 # LLM Suite
 

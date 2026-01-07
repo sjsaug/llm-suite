@@ -10,6 +10,7 @@ import json
 import configparser
 import os
 import time
+from langchain_core.prompts import ChatPromptTemplate
 from dataclasses import dataclass, field, asdict
 from typing import Dict, List, Any
 
@@ -825,8 +826,39 @@ with st.sidebar:
 st.header("Enter Your Prompt")
 user_prompt = st.text_area("The same prompt will be sent to all selected models", "")
 
+# --- Handle Context Variables in System Prompt ---
+system_prompt_vars = {}
+prompt_template = None
+template_error = None
+
+if system_prompt:
+    try:
+        # Detect variables in the system prompt
+        prompt_template = ChatPromptTemplate.from_template(system_prompt)
+        input_vars = prompt_template.input_variables
+        
+        if input_vars:
+            st.markdown("### System Prompt Variables")
+            style_cols = st.columns(3) # Use fixed columns for better layout
+            
+            for i, var in enumerate(input_vars):
+                col_idx = i % 3
+                with style_cols[col_idx]:
+                    # Use session state to persist values
+                    key = f"sys_prompt_var_{var}"
+                    system_prompt_vars[var] = st.text_input(
+                        f"Value for {{{var}}}", 
+                        key=key
+                    )
+    except Exception as e:
+        # Just catch it, we'll display error if they try to run
+        template_error = f"Error parsing system prompt template: {str(e)}"
+
 # Compare Models button
 compare_button = st.button("Compare Models", use_container_width=True)
+
+if template_error:
+    st.error(template_error)
 
 # Add a stop button that only shows during inference
 stop_button_container = st.empty()
@@ -839,7 +871,7 @@ progress_bar = st.empty()
 streaming_section = st.empty()
 
 # Define the model processing function
-def process_models(selected_models):
+def process_models(selected_models, system_prompt_text=None):
     """Process all selected models and collect responses with performance stats."""
     # Reset debug info for this run
     st.session_state.debug_info = []
@@ -870,7 +902,7 @@ def process_models(selected_models):
                 response, stats = query_model_streaming(
                     model, 
                     user_prompt, 
-                    system_prompt, 
+                    system_prompt_text, 
                     temperature, 
                     progress_container,
                     streaming_display
@@ -879,7 +911,7 @@ def process_models(selected_models):
                 # Show processing message when not streaming
                 progress_container.markdown(f"**Generating {i+1}/{len(selected_models)}:** {model}")
                 progress_bar.progress((i) / len(selected_models))
-                response, stats = query_model(model, user_prompt, system_prompt, temperature)
+                response, stats = query_model(model, user_prompt, system_prompt_text, temperature)
             
             st.session_state.results[model] = response
             st.session_state.performance_stats[model] = stats
@@ -917,9 +949,52 @@ def remove_think_blocks(text):
     return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
 
 if compare_button:
-    if not selected_models:
+    # --- Check for variable errors ---
+    validation_error = None
+    final_system_prompt = system_prompt
+    
+    if prompt_template:
+        missing_vars = [var for var, val in system_prompt_vars.items() if not val]
+        
+        if missing_vars:
+            validation_error = f"Missing values for system prompt variables: {', '.join(missing_vars)}"
+        else:
+            try:
+                # Format the system prompt
+                # Note: format returns a string if the template produces a string (which ChatPromptTemplate usually does for system messages content if simple)
+                # Actually ChatPromptTemplate.format returns a string or list of messages. 
+                # Converting to string if needed, but ollama expects string for system prompt usually.
+                # Let's ensure we get the string content. 
+                # If ChatPromptTemplate is just a string template, .format() returns string.
+                # But ChatPromptTemplate.from_template(str) creates a ChatPromptTemplate.
+                # .format() returns a string representation of the messages in some cases, or list of messages.
+                # Better to use .format_messages if we want messages, or just treat 'system_prompt' as a string template if simple.
+                
+                # Let's check what user asked: "Use Langchain's ChatPromptTemplate"
+                # If I use ChatPromptTemplate.from_template("some {var}"), it creates a MessagePromptTemplate inside.
+                # format() returns a string for the whole coversation if formatted as string? No.
+                # Let's stick to simple formatting if possible, OR use format_messages
+                
+                messages = prompt_template.format_messages(**system_prompt_vars)
+                # Extract content from the first message (assuming it's the system message)
+                if messages and hasattr(messages[0], 'content'):
+                    final_system_prompt = messages[0].content
+                else:
+                     final_system_prompt = prompt_template.format(**system_prompt_vars)
+            
+            except Exception as e:
+                validation_error = f"Error formatting system prompt: {str(e)}"
+
+    if validation_error:
+        st.error(validation_error)
+    elif not selected_models:
         st.warning("Please select at least one model to compare.")
     else:
+        # Clear accuracy ratings
+        keys_to_remove = [k for k in st.session_state.keys() if k.startswith("rating_")]
+        for k in keys_to_remove:
+            del st.session_state[k]
+
         # Clear previous results
         st.session_state.results = {}
         st.session_state.current_streaming_text = ""
@@ -942,9 +1017,9 @@ if compare_button:
         # Process models with or without spinner based on streaming setting
         if not enable_streaming:
             with st.spinner("Generating responses..."):
-                process_models(selected_models)
+                process_models(selected_models, final_system_prompt)
         else:
-            process_models(selected_models)
+            process_models(selected_models, final_system_prompt)
 
 # Display results
 if st.session_state.results:
@@ -1160,6 +1235,11 @@ if st.session_state.results:
                 st.caption(format_performance_stats(stats))
             st.markdown(f"<div class='model-response'>{html.escape(response)}</div>", 
                        unsafe_allow_html=True)
+            st.selectbox(
+                "Accuracy",
+                options=["Select...", "Accurate", "Somewhat Accurate", "Not Accurate"],
+                key=f"rating_side_{model_name}"
+            )
         else:
             for i in range(0, len(models_with_results), 2):
                 row_cols = st.columns(2)
@@ -1175,6 +1255,11 @@ if st.session_state.results:
                         st.caption(format_performance_stats(stats))
                     st.markdown(f"<div class='model-response'>{html.escape(response)}</div>",
                                unsafe_allow_html=True)
+                    st.selectbox(
+                        "Accuracy",
+                        options=["Select...", "Accurate", "Somewhat Accurate", "Not Accurate"],
+                        key=f"rating_side_{model_name}"
+                    )
                 if i + 1 < len(models_with_results):
                     with row_cols[1]:
                         model_name = models_with_results[i + 1]
@@ -1188,6 +1273,11 @@ if st.session_state.results:
                             st.caption(format_performance_stats(stats))
                         st.markdown(f"<div class='model-response'>{html.escape(response)}</div>", 
                                    unsafe_allow_html=True)
+                        st.selectbox(
+                            "Accuracy",
+                            options=["Select...", "Accurate", "Somewhat Accurate", "Not Accurate"],
+                            key=f"rating_side_{model_name}"
+                        )
     
     with tab2:
         # Stacked view
@@ -1205,3 +1295,87 @@ if st.session_state.results:
                 if model in st.session_state.performance_stats:
                     st.caption(format_performance_stats(st.session_state.performance_stats[model]))
                 st.markdown(f"<div class='model-response'>{html.escape(response)}</div>", unsafe_allow_html=True)
+                st.selectbox(
+                    "Accuracy",
+                    options=["Select...", "Accurate", "Somewhat Accurate", "Not Accurate"],
+                    key=f"rating_stacked_{model}"
+                )
+
+    st.divider()
+    st.subheader("Accuracy Analysis")
+
+    if st.button("Generate Accuracy Chart", key="generate_accuracy_chart"):
+        # Collect ratings
+        model_ratings = {}
+        for model in st.session_state.results.keys():
+            # Check both possible keys
+            side_key = f"rating_side_{model}"
+            stacked_key = f"rating_stacked_{model}"
+            
+            side_rating = st.session_state.get(side_key, "Select...")
+            stacked_rating = st.session_state.get(stacked_key, "Select...")
+            
+            final_rating = "Select..."
+            if side_rating != "Select...":
+                final_rating = side_rating
+            elif stacked_rating != "Select...":
+                final_rating = stacked_rating
+                
+            if final_rating != "Select...":
+                model_ratings[model] = final_rating
+        
+        if not model_ratings:
+            st.warning("No ratings provided yet. Please rate the models above.")
+        else:
+            # Generate chart
+            # Mapping: Not Accurate=1, Somewhat=2, Accurate=3
+            rating_values = {"Accurate": 3, "Somewhat Accurate": 2, "Not Accurate": 1}
+            rating_colors = {"Accurate": "#4CAF50", "Somewhat Accurate": "#FFC107", "Not Accurate": "#F44336"}
+            
+            chart_data = []
+            colors = []
+            
+            # Sort by model name for consistency
+            for model in sorted(model_ratings.keys()):
+                rating = model_ratings[model]
+                chart_data.append({"Model": model, "Score": rating_values[rating], "Rating": rating})
+                colors.append(rating_colors[rating])
+            
+            if not chart_data:
+                st.warning("No valid ratings found.")
+            else:
+                df_chart = pd.DataFrame(chart_data)
+                
+                # Import matplotlib just in case (already imported at top but safe to use)
+                import matplotlib.pyplot as plt
+                import io
+
+                fig3, ax3 = plt.subplots(figsize=(10, 6))
+                bars = ax3.bar(df_chart["Model"], df_chart["Score"], color=colors)
+                
+                ax3.set_title("Model Accuracy Ratings")
+                ax3.set_ylabel("Accuracy Level")
+                ax3.set_yticks([1, 2, 3])
+                ax3.set_yticklabels(["Not Accurate", "Somewhat", "Accurate"])
+                ax3.set_ylim(0, 3.5)
+                ax3.grid(axis='y', linestyle='--', alpha=0.7)
+                
+                if len(df_chart) > 3:
+                    plt.xticks(rotation=45, ha='right')
+                
+                plt.tight_layout()
+                st.pyplot(fig3)
+                
+                # Download button
+                buf3 = io.BytesIO()
+                fig3.savefig(buf3, format='png', dpi=150, bbox_inches='tight')
+                buf3.seek(0)
+                
+                st.download_button(
+                    label="Download Accuracy Chart",
+                    data=buf3,
+                    file_name="accuracy_chart.png",
+                    mime="image/png",
+                    use_container_width=True
+                )
+                plt.close(fig3)
