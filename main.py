@@ -1341,9 +1341,11 @@ if st.session_state.results:
             current_ratings,
             st.session_state.evaluation_result
         )
-        # Using .tobytes() or simply the output from output('S') which is bytearray
-        # FPDF2 output('S') returns bytearray in Python 3
-        pdf_data = bytes(pdf_bytes)
+        # Handle potential string return (legacy behavioral or config)
+        if isinstance(pdf_bytes, str):
+            pdf_data = pdf_bytes.encode('latin-1')
+        else:
+            pdf_data = bytes(pdf_bytes)
         
         with col3:
             st.download_button(
