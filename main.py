@@ -931,33 +931,33 @@ with st.sidebar:
 st.header("Enter Your Prompt")
 user_prompt = st.text_area("The same prompt will be sent to all selected models", "")
 
-# --- Handle Context Variables in System Prompt ---
-system_prompt_vars = {}
+# --- Handle Context Variables in User Prompt ---
+user_prompt_vars = {}
 prompt_template = None
 template_error = None
 
-if system_prompt:
+if user_prompt:
     try:
-        # Detect variables in the system prompt
-        prompt_template = ChatPromptTemplate.from_template(system_prompt)
+        # Detect variables in the user prompt
+        prompt_template = ChatPromptTemplate.from_template(user_prompt)
         input_vars = prompt_template.input_variables
         
         if input_vars:
-            st.markdown("### System Prompt Variables")
+            st.markdown("### Prompt Variables")
             style_cols = st.columns(3) # Use fixed columns for better layout
             
             for i, var in enumerate(input_vars):
                 col_idx = i % 3
                 with style_cols[col_idx]:
                     # Use session state to persist values
-                    key = f"sys_prompt_var_{var}"
-                    system_prompt_vars[var] = st.text_input(
+                    key = f"user_prompt_var_{var}"
+                    user_prompt_vars[var] = st.text_input(
                         f"Value for {{{var}}}", 
                         key=key
                     )
     except Exception as e:
         # Just catch it, we'll display error if they try to run
-        template_error = f"Error parsing system prompt template: {str(e)}"
+        template_error = f"Error parsing prompt template: {str(e)}"
 
 # Compare Models button
 compare_button = st.button("Compare Models", use_container_width=True)
@@ -976,8 +976,12 @@ progress_bar = st.empty()
 streaming_section = st.empty()
 
 # Define the model processing function
-def process_models(selected_models, system_prompt_text=None):
+def process_models(selected_models, system_prompt_text=None, user_prompt_text=None):
     """Process all selected models and collect responses with performance stats."""
+    # Default to globol user_prompt if not provided
+    if user_prompt_text is None:
+        user_prompt_text = user_prompt
+        
     # Reset debug info for this run
     st.session_state.debug_info = []
     st.session_state.debug_info.append(f"Starting comparison with {len(selected_models)} models")
@@ -1006,7 +1010,7 @@ def process_models(selected_models, system_prompt_text=None):
                 
                 response, stats = query_model_streaming(
                     model, 
-                    user_prompt, 
+                    user_prompt_text, 
                     system_prompt_text, 
                     temperature, 
                     progress_container,
@@ -1016,7 +1020,7 @@ def process_models(selected_models, system_prompt_text=None):
                 # Show processing message when not streaming
                 progress_container.markdown(f"**Generating {i+1}/{len(selected_models)}:** {model}")
                 progress_bar.progress((i) / len(selected_models))
-                response, stats = query_model(model, user_prompt, system_prompt_text, temperature)
+                response, stats = query_model(model, user_prompt_text, system_prompt_text, temperature)
             
             st.session_state.results[model] = response
             st.session_state.performance_stats[model] = stats
@@ -1056,39 +1060,26 @@ def remove_think_blocks(text):
 if compare_button:
     # --- Check for variable errors ---
     validation_error = None
-    final_system_prompt = system_prompt
+    final_user_prompt = user_prompt
     
     if prompt_template:
-        missing_vars = [var for var, val in system_prompt_vars.items() if not val]
+        missing_vars = [var for var, val in user_prompt_vars.items() if not val]
         
         if missing_vars:
-            validation_error = f"Missing values for system prompt variables: {', '.join(missing_vars)}"
+            validation_error = f"Missing values for prompt variables: {', '.join(missing_vars)}"
         else:
             try:
-                # Format the system prompt
-                # Note: format returns a string if the template produces a string (which ChatPromptTemplate usually does for system messages content if simple)
-                # Actually ChatPromptTemplate.format returns a string or list of messages. 
-                # Converting to string if needed, but ollama expects string for system prompt usually.
-                # Let's ensure we get the string content. 
-                # If ChatPromptTemplate is just a string template, .format() returns string.
-                # But ChatPromptTemplate.from_template(str) creates a ChatPromptTemplate.
-                # .format() returns a string representation of the messages in some cases, or list of messages.
-                # Better to use .format_messages if we want messages, or just treat 'system_prompt' as a string template if simple.
-                
-                # Let's check what user asked: "Use Langchain's ChatPromptTemplate"
-                # If I use ChatPromptTemplate.from_template("some {var}"), it creates a MessagePromptTemplate inside.
-                # format() returns a string for the whole coversation if formatted as string? No.
-                # Let's stick to simple formatting if possible, OR use format_messages
-                
-                messages = prompt_template.format_messages(**system_prompt_vars)
-                # Extract content from the first message (assuming it's the system message)
+                # Format the user prompt
+                # ChatPromptTemplate.format returns a string if the template produces a string
+                messages = prompt_template.format_messages(**user_prompt_vars)
+                # Extract content from the first message
                 if messages and hasattr(messages[0], 'content'):
-                    final_system_prompt = messages[0].content
+                    final_user_prompt = messages[0].content
                 else:
-                     final_system_prompt = prompt_template.format(**system_prompt_vars)
+                     final_user_prompt = prompt_template.format(**user_prompt_vars)
             
             except Exception as e:
-                validation_error = f"Error formatting system prompt: {str(e)}"
+                validation_error = f"Error formatting prompt: {str(e)}"
 
     if validation_error:
         st.error(validation_error)
@@ -1122,9 +1113,9 @@ if compare_button:
         # Process models with or without spinner based on streaming setting
         if not enable_streaming:
             with st.spinner("Generating responses..."):
-                process_models(selected_models, final_system_prompt)
+                process_models(selected_models, system_prompt, final_user_prompt)
         else:
-            process_models(selected_models, final_system_prompt)
+            process_models(selected_models, system_prompt, final_user_prompt)
 
 # Display results
 if st.session_state.results:
