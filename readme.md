@@ -1,3 +1,6 @@
+## Disclaimer
+**The st UI was mostly vibe coded. I wrote all things pertaining to inference and config management without AI assistance.**
+
 # LLM Suite
 
 LLM Suite allows you compare responses of various local LLMs.
