@@ -667,7 +667,7 @@ def generate_pdf_report(user_prompt, system_prompt, results, stats, ratings, eva
         stats_text = "No stats available"
         if model in stats:
             s = stats[model]
-            stats_text = f"Time: {s.total_time:.2f}s | Speed: {s.tokens_per_second:.1f} t/s | Tokens: {s.completion_tokens}"
+            stats_text = f"Time: {s.total_time:.2f}s | Speed: {s.tokens_per_second:.1f} t/s | TTFT: {s.time_to_first_token:.3f}s | Tokens: {s.completion_tokens}"
         
         rating = ratings.get(model, "N/A")
         pdf.cell(0, 6, f"{stats_text} | Accuracy: {rating}", 0, 1)

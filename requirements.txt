@@ -4,3 +4,4 @@ ollama
 matplotlib
 langchain
 fpdf2
+pypdf
