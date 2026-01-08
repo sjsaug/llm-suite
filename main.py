@@ -495,10 +495,94 @@ def collect_model_ratings():
             model_ratings[model] = final_rating
     return model_ratings
 
+
+# --- Chart Generation Helpers ---
+import matplotlib.pyplot as plt
+
+def create_speed_chart(stats_df):
+    fig, ax = plt.subplots(figsize=(10, 6))
+    models = stats_df["Model"].tolist()
+    speeds = stats_df["Tokens per Second"].tolist()
+    
+    bars = ax.bar(models, speeds, color='#4CAF50')
+    ax.set_xlabel('Model')
+    ax.set_ylabel('Tokens per Second')
+    ax.set_title('Model Speed Comparison')
+    
+    if len(models) > 3:
+        plt.xticks(rotation=45, ha='right')
+    
+    for bar, speed in zip(bars, speeds):
+        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.5,
+               f'{speed:.1f}', ha='center', va='bottom', fontsize=9)
+    
+    plt.tight_layout()
+    return fig
+
+def create_time_chart(stats_df):
+    fig, ax = plt.subplots(figsize=(10, 6))
+    models = stats_df["Model"].tolist()
+    
+    x = range(len(models))
+    width = 0.35
+    
+    total_times = stats_df["Total Time (seconds)"].tolist()
+    first_token_times = stats_df["Time to First Token (seconds)"].tolist()
+    
+    bars1 = ax.bar([i - width/2 for i in x], total_times, width, label='Total Time', color='#2196F3')
+    bars2 = ax.bar([i + width/2 for i in x], first_token_times, width, label='Time to First Token', color='#FF9800')
+    
+    ax.set_xlabel('Model')
+    ax.set_ylabel('Time (seconds)')
+    ax.set_title('Model Time Comparison')
+    ax.set_xticks(x)
+    ax.set_xticklabels(models)
+    ax.legend()
+    
+    if len(models) > 3:
+        plt.xticks(rotation=45, ha='right')
+    
+    plt.tight_layout()
+    return fig
+
+def create_accuracy_chart(model_ratings):
+    rating_values = {"Accurate": 3, "Somewhat Accurate": 2, "Not Accurate": 1}
+    rating_colors = {"Accurate": "#4CAF50", "Somewhat Accurate": "#FFC107", "Not Accurate": "#F44336"}
+    
+    chart_data = []
+    colors = []
+    
+    for model in sorted(model_ratings.keys()):
+        rating = model_ratings.get(model, "N/A")
+        if rating in rating_values:
+            chart_data.append({"Model": model, "Score": rating_values[rating], "Rating": rating})
+            colors.append(rating_colors[rating])
+    
+    if not chart_data:
+        return None
+        
+    df_chart = pd.DataFrame(chart_data)
+    
+    fig, ax = plt.subplots(figsize=(10, 6))
+    bars = ax.bar(df_chart["Model"], df_chart["Score"], color=colors)
+    
+    ax.set_title("Model Accuracy Ratings")
+    ax.set_ylabel("Accuracy Level")
+    ax.set_yticks([1, 2, 3])
+    ax.set_yticklabels(["Not Accurate", "Somewhat", "Accurate"])
+    ax.set_ylim(0, 3.5)
+    ax.grid(axis='y', linestyle='--', alpha=0.7)
+    
+    if len(df_chart) > 3:
+        plt.xticks(rotation=45, ha='right')
+    
+    plt.tight_layout()
+    return fig
+
 class PDFReport(FPDF):
     def header(self):
         self.set_font('Helvetica', 'B', 15)
-        self.cell(0, 10, 'LLM Suite Comparison Report', 0, 1, 'C')
+        self.cell(0, 10, 'Comparison Report', 0, 1, 'C')
         self.ln(5)
 
     def footer(self):
@@ -506,7 +590,7 @@ class PDFReport(FPDF):
         self.set_font('Helvetica', 'I', 8)
         self.cell(0, 10, f'Page {self.page_no()}/{{nb}}', 0, 0, 'C')
 
-def generate_pdf_report(user_prompt, system_prompt, results, stats, ratings, evaluation):
+def generate_pdf_report(user_prompt, system_prompt, results, stats, ratings, evaluation, prompt_vars=None, chart_paths=None):
     pdf = PDFReport()
     pdf.alias_nb_pages()
     pdf.add_page()
@@ -520,17 +604,58 @@ def generate_pdf_report(user_prompt, system_prompt, results, stats, ratings, eva
     pdf.set_font("Helvetica", size=11)
     pdf.multi_cell(0, 6, user_prompt)
     pdf.ln(5)
+
+    # Prompt Variables Section
+    if prompt_vars:
+        pdf.set_font("Helvetica", 'B', 12)
+        pdf.cell(0, 10, "Prompt Variables:", 0, 1)
+        pdf.set_font("Helvetica", size=11)
+        for var, val in prompt_vars.items():
+            pdf.multi_cell(0, 6, f"{var}: {val}")
+        pdf.ln(5)
+
+    # Charts Section (New)
+    if chart_paths:
+        # Check if we have space, else add page
+        if pdf.get_y() > 200:
+            pdf.add_page()
+            
+        pdf.set_font("Helvetica", 'B', 12)
+        pdf.cell(0, 10, "Performance & Accuracy Charts:", 0, 1)
+        pdf.ln(2)
+        
+        for title, path in chart_paths.items():
+            if pdf.get_y() > 200:
+                pdf.add_page()
+            pdf.set_font("Helvetica", 'B', 11)
+            pdf.cell(0, 10, title, 0, 1)
+            try:
+                # Adjust image width to fit page mostly
+                # A4 width is 210mm. Margins approx 10mm each side -> 190mm width
+                pdf.image(path, x=10, w=190)
+                pdf.ln(5)
+            except Exception as e:
+                pdf.set_font("Helvetica", 'I', 10)
+                pdf.cell(0, 10, f"Error adding chart: {str(e)}", 0, 1)
+            pdf.ln(5)
+        pdf.ln(5)
     
     if system_prompt:
         pdf.set_font("Helvetica", 'B', 12)
         pdf.cell(0, 10, "System Prompt:", 0, 1)
+
         pdf.set_font("Helvetica", size=11)
         pdf.multi_cell(0, 6, system_prompt)
         pdf.ln(5)
         
     # Models Section
     for model, response in results.items():
-        pdf.add_page()
+        # Check if we have enough space for the header, otherwise add page
+        if pdf.get_y() > 230:
+            pdf.add_page()
+        else:
+            pdf.ln(10)
+            
         pdf.set_font("Helvetica", 'B', 14)
         pdf.cell(0, 10, f"Model: {model}", 0, 1)
         
@@ -1169,25 +1294,8 @@ if st.session_state.results:
                     import matplotlib.pyplot as plt
                     import io
                     
-                    fig, ax = plt.subplots(figsize=(10, 6))
-                    models = stats_df["Model"].tolist()
-                    speeds = stats_df["Tokens per Second"].tolist()
-                    
-                    bars = ax.bar(models, speeds, color='#4CAF50')
-                    ax.set_xlabel('Model')
-                    ax.set_ylabel('Tokens per Second')
-                    ax.set_title('Model Speed Comparison')
-                    
-                    # Rotate x-axis labels if many models
-                    if len(models) > 3:
-                        plt.xticks(rotation=45, ha='right')
-                    
-                    # Add value labels on bars
-                    for bar, speed in zip(bars, speeds):
-                        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.5,
-                               f'{speed:.1f}', ha='center', va='bottom', fontsize=9)
-                    
-                    plt.tight_layout()
+                    # Create chart using helper
+                    fig = create_speed_chart(stats_df)
                     st.pyplot(fig)
                     
                     # Export chart as PNG
@@ -1208,28 +1316,7 @@ if st.session_state.results:
                     # Additional chart: Time comparison
                     st.markdown("#### Time Comparison")
                     
-                    fig2, ax2 = plt.subplots(figsize=(10, 6))
-                    
-                    x = range(len(models))
-                    width = 0.35
-                    
-                    total_times = stats_df["Total Time (seconds)"].tolist()
-                    first_token_times = stats_df["Time to First Token (seconds)"].tolist()
-                    
-                    bars1 = ax2.bar([i - width/2 for i in x], total_times, width, label='Total Time', color='#2196F3')
-                    bars2 = ax2.bar([i + width/2 for i in x], first_token_times, width, label='Time to First Token', color='#FF9800')
-                    
-                    ax2.set_xlabel('Model')
-                    ax2.set_ylabel('Time (seconds)')
-                    ax2.set_title('Model Time Comparison')
-                    ax2.set_xticks(x)
-                    ax2.set_xticklabels(models)
-                    ax2.legend()
-                    
-                    if len(models) > 3:
-                        plt.xticks(rotation=45, ha='right')
-                    
-                    plt.tight_layout()
+                    fig2 = create_time_chart(stats_df)
                     st.pyplot(fig2)
                     
                     # Export time chart as PNG
@@ -1246,7 +1333,7 @@ if st.session_state.results:
                     )
                     
                     plt.close(fig2)  # Clean up
-    
+
     # Create download buttons and add Evaluate button
     results_df = pd.DataFrame({
         "Model": list(st.session_state.results.keys()),
@@ -1324,14 +1411,61 @@ if st.session_state.results:
 
     # Generate PDF Report
     try:
+        # Generate charts for PDF
+        import tempfile
+        chart_paths = {}
+        
+        # Speed Chart
+        if len(st.session_state.performance_stats) > 0:
+            stats_df = create_stats_dataframe(st.session_state.performance_stats)
+            if not stats_df.empty:
+                try:
+                    speed_fig = create_speed_chart(stats_df)
+                    if speed_fig:
+                        with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp:
+                            speed_fig.savefig(tmp.name, format='png', dpi=150, bbox_inches='tight')
+                            chart_paths['Speed Comparison'] = tmp.name
+                        plt.close(speed_fig)
+                        
+                    time_fig = create_time_chart(stats_df)
+                    if time_fig:
+                        with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp:
+                            time_fig.savefig(tmp.name, format='png', dpi=150, bbox_inches='tight')
+                            chart_paths['Time Comparison'] = tmp.name
+                        plt.close(time_fig)
+                except Exception as e:
+                    st.warning(f"Could not generate performance charts for PDF: {e}")
+
+        # Accuracy Chart
+        if current_ratings:
+            try:
+                acc_fig = create_accuracy_chart(current_ratings)
+                if acc_fig:
+                    with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp:
+                        acc_fig.savefig(tmp.name, format='png', dpi=150, bbox_inches='tight')
+                        chart_paths['Accuracy Ratings'] = tmp.name
+                    plt.close(acc_fig)
+            except Exception as e:
+                st.warning(f"Could not generate accuracy chart for PDF: {e}")
+
         pdf_bytes = generate_pdf_report(
             user_prompt,
             system_prompt,
             st.session_state.results,
             st.session_state.performance_stats,
             current_ratings,
-            st.session_state.evaluation_result
+            st.session_state.evaluation_result,
+            user_prompt_vars,
+            chart_paths
         )
+        
+        # Cleanup temp files
+        for path in chart_paths.values():
+            try:
+                os.remove(path)
+            except:
+                pass
+
         # Handle potential string return (legacy behavioral or config)
         if isinstance(pdf_bytes, str):
             pdf_data = pdf_bytes.encode('latin-1')
