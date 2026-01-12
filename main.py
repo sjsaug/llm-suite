@@ -593,25 +593,66 @@ class PDFReport(FPDF):
 def generate_pdf_report(user_prompt, system_prompt, results, stats, ratings, evaluation, prompt_vars=None, chart_paths=None):
     pdf = PDFReport()
     pdf.alias_nb_pages()
-    pdf.add_page()
-    
-    # Font settings
-    pdf.set_font("Helvetica", size=12)
+
+    # Try to register a Unicode TrueType font (DejaVuSans) if available so we can
+    # include UTF-8 characters in the PDF. If not available, we'll fall back to
+    # Latin-1 with replacement for unsupported characters.
+    unicode_font_registered = False
+    font_paths = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    ]
+    for fp in font_paths:
+        try:
+            if os.path.exists(fp):
+                pdf.add_page()  # add page after alias to avoid font issues
+                pdf.add_font('DejaVu', '', fp, uni=True)
+                unicode_font_registered = True
+                break
+        except Exception:
+            unicode_font_registered = False
+
+    # If a unicode font wasn't registered, ensure we still have a page
+    if not unicode_font_registered:
+        pdf.add_page()
+
+    # Helper to sanitize text based on font availability
+    def _safe_text(txt: str) -> str:
+        if txt is None:
+            return ""
+        if unicode_font_registered:
+            return str(txt)
+        try:
+            return str(txt).encode('latin-1', 'replace').decode('latin-1')
+        except Exception:
+            return str(txt)
     
     # Prompt Section
-    pdf.set_font("Helvetica", 'B', 12)
+    if unicode_font_registered:
+        pdf.set_font('DejaVu', '', 12)
+    else:
+        pdf.set_font("Helvetica", 'B', 12)
     pdf.cell(0, 10, "User Prompt:", 0, 1)
-    pdf.set_font("Helvetica", size=11)
-    pdf.multi_cell(0, 6, user_prompt)
+    if unicode_font_registered:
+        pdf.set_font('DejaVu', '', 11)
+    else:
+        pdf.set_font("Helvetica", size=11)
+    pdf.multi_cell(0, 6, _safe_text(user_prompt))
     pdf.ln(5)
 
     # Prompt Variables Section
     if prompt_vars:
-        pdf.set_font("Helvetica", 'B', 12)
+        if unicode_font_registered:
+            pdf.set_font('DejaVu', '', 12)
+        else:
+            pdf.set_font("Helvetica", 'B', 12)
         pdf.cell(0, 10, "Prompt Variables:", 0, 1)
-        pdf.set_font("Helvetica", size=11)
+        if unicode_font_registered:
+            pdf.set_font('DejaVu', '', 11)
+        else:
+            pdf.set_font("Helvetica", size=11)
         for var, val in prompt_vars.items():
-            pdf.multi_cell(0, 6, f"{var}: {val}")
+            pdf.multi_cell(0, 6, _safe_text(f"{var}: {val}"))
         pdf.ln(5)
 
     # Charts Section (New)
@@ -627,25 +668,37 @@ def generate_pdf_report(user_prompt, system_prompt, results, stats, ratings, eva
         for title, path in chart_paths.items():
             if pdf.get_y() > 200:
                 pdf.add_page()
-            pdf.set_font("Helvetica", 'B', 11)
-            pdf.cell(0, 10, title, 0, 1)
+            if unicode_font_registered:
+                pdf.set_font('DejaVu', '', 11)
+            else:
+                pdf.set_font("Helvetica", 'B', 11)
+            pdf.cell(0, 10, _safe_text(title), 0, 1)
             try:
                 # Adjust image width to fit page mostly
                 # A4 width is 210mm. Margins approx 10mm each side -> 190mm width
                 pdf.image(path, x=10, w=190)
                 pdf.ln(5)
             except Exception as e:
-                pdf.set_font("Helvetica", 'I', 10)
-                pdf.cell(0, 10, f"Error adding chart: {str(e)}", 0, 1)
+                if unicode_font_registered:
+                    pdf.set_font('DejaVu', '', 10)
+                else:
+                    pdf.set_font("Helvetica", 'I', 10)
+                pdf.cell(0, 10, _safe_text(f"Error adding chart: {str(e)}"), 0, 1)
             pdf.ln(5)
         pdf.ln(5)
     
     if system_prompt:
-        pdf.set_font("Helvetica", 'B', 12)
+        if unicode_font_registered:
+            pdf.set_font('DejaVu', '', 12)
+        else:
+            pdf.set_font("Helvetica", 'B', 12)
         pdf.cell(0, 10, "System Prompt:", 0, 1)
 
-        pdf.set_font("Helvetica", size=11)
-        pdf.multi_cell(0, 6, system_prompt)
+        if unicode_font_registered:
+            pdf.set_font('DejaVu', '', 11)
+        else:
+            pdf.set_font("Helvetica", size=11)
+        pdf.multi_cell(0, 6, _safe_text(system_prompt))
         pdf.ln(5)
         
     # Models Section
@@ -655,54 +708,70 @@ def generate_pdf_report(user_prompt, system_prompt, results, stats, ratings, eva
             pdf.add_page()
         else:
             pdf.ln(10)
-            
-        pdf.set_font("Helvetica", 'B', 14)
-        pdf.cell(0, 10, f"Model: {model}", 0, 1)
-        
+
+        if unicode_font_registered:
+            pdf.set_font('DejaVu', '', 14)
+        else:
+            pdf.set_font("Helvetica", 'B', 14)
+        pdf.cell(0, 10, _safe_text(f"Model: {model}"), 0, 1)
+
         # Stats & Accuracy
-        pdf.set_font("Helvetica", 'B', 10)
-        pdf.cell(0, 6, "Performance & Accuracy:", 0, 1)
-        pdf.set_font("Helvetica", size=10)
-        
+        if unicode_font_registered:
+            pdf.set_font('DejaVu', '', 10)
+        else:
+            pdf.set_font("Helvetica", 'B', 10)
+        pdf.cell(0, 6, _safe_text("Performance & Accuracy:"), 0, 1)
+        if unicode_font_registered:
+            pdf.set_font('DejaVu', '', 10)
+        else:
+            pdf.set_font("Helvetica", size=10)
+
         stats_text = "No stats available"
         if model in stats:
             s = stats[model]
             stats_text = f"Time: {s.total_time:.2f}s | Speed: {s.tokens_per_second:.1f} t/s | TTFT: {s.time_to_first_token:.3f}s | Tokens: {s.completion_tokens}"
-        
+
         rating = ratings.get(model, "N/A")
-        pdf.cell(0, 6, f"{stats_text} | Accuracy: {rating}", 0, 1)
+        pdf.cell(0, 6, _safe_text(f"{stats_text} | Accuracy: {rating}"), 0, 1)
         pdf.ln(5)
-        
+
         # Response
-        pdf.set_font("Helvetica", 'B', 12)
-        pdf.cell(0, 10, "Response:", 0, 1)
-        pdf.set_font("Helvetica", size=10)
-        
-        # Determine encoding or handle unicode issues
-        # FPDF has limitations with some unicode characters.
-        # We can try to replace some common issues or use a compatible font if available.
-        # For simplicity, we'll encode to latin-1 and ignore errors, or replace.
-        try:
-            safe_response = response.encode('latin-1', 'replace').decode('latin-1')
-        except:
-            safe_response = "Error encoding response text for PDF."
-            
-        pdf.multi_cell(0, 5, safe_response)
+        if unicode_font_registered:
+            pdf.set_font('DejaVu', '', 12)
+        else:
+            pdf.set_font("Helvetica", 'B', 12)
+        pdf.cell(0, 10, _safe_text("Response:"), 0, 1)
+        if unicode_font_registered:
+            pdf.set_font('DejaVu', '', 10)
+        else:
+            pdf.set_font("Helvetica", size=10)
+
+        pdf.multi_cell(0, 5, _safe_text(response))
         pdf.ln(5)
 
     # Evaluation Section
     if evaluation:
         pdf.add_page()
-        pdf.set_font("Helvetica", 'B', 14)
-        pdf.cell(0, 10, "Evaluation Result", 0, 1)
-        pdf.set_font("Helvetica", size=10)
-        try:
-            safe_eval = evaluation.encode('latin-1', 'replace').decode('latin-1')
-        except:
-            safe_eval = "Error encoding evaluation text."
-        pdf.multi_cell(0, 5, safe_eval)
-        
-    return pdf.output(dest='S')
+        if unicode_font_registered:
+            pdf.set_font('DejaVu', '', 14)
+        else:
+            pdf.set_font("Helvetica", 'B', 14)
+        pdf.cell(0, 10, _safe_text("Evaluation Result"), 0, 1)
+        if unicode_font_registered:
+            pdf.set_font('DejaVu', '', 10)
+        else:
+            pdf.set_font("Helvetica", size=10)
+        pdf.multi_cell(0, 5, _safe_text(evaluation))
+    # Return bytes for the PDF. `output(dest='S')` returns a string in FPDF,
+    # so encode it to bytes. Prefer Latin-1 encoding as FPDF uses single-byte
+    # encodings internally; fall back to a replacement strategy if needed.
+    pdf_output = pdf.output(dest='S')
+    if isinstance(pdf_output, bytes):
+        return pdf_output
+    try:
+        return pdf_output.encode('latin-1')
+    except Exception:
+        return pdf_output.encode('latin-1', 'replace')
 
 def get_installed_model_names():
     _, models_info = get_available_models()
