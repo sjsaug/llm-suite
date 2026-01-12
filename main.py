@@ -598,9 +598,15 @@ def generate_pdf_report(user_prompt, system_prompt, results, stats, ratings, eva
     # include UTF-8 characters in the PDF. If not available, we'll fall back to
     # Latin-1 with replacement for unsupported characters.
     unicode_font_registered = False
+    # Common TTF font paths across Linux, macOS and Windows
     font_paths = [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/Library/Fonts/DejaVuSans.ttf",
+        "/Library/Fonts/LiberationSans-Regular.ttf",
+        "C:\\Windows\\Fonts\\DejaVuSans.ttf",
+        "C:\\Windows\\Fonts\\LiberationSans-Regular.ttf",
+        "C:\\Windows\\Fonts\\Arial.ttf",
     ]
     for fp in font_paths:
         try:
@@ -623,7 +629,16 @@ def generate_pdf_report(user_prompt, system_prompt, results, stats, ratings, eva
         if unicode_font_registered:
             return str(txt)
         try:
-            return str(txt).encode('latin-1', 'replace').decode('latin-1')
+            s = str(txt)
+            # If using non-unicode core fonts, ensure very long unbroken
+            # sequences are split so FPDF can wrap them on all platforms
+            def _break_long_words(text: str, maxlen: int = 80) -> str:
+                return re.sub(r"(\S{%d,})" % maxlen,
+                              lambda m: ' '.join([m.group(0)[i:i+maxlen] for i in range(0, len(m.group(0)), maxlen)]),
+                              text)
+
+            s = _break_long_words(s, maxlen=80)
+            return s.encode('latin-1', 'replace').decode('latin-1')
         except Exception:
             return str(txt)
     
