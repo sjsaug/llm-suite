@@ -1107,7 +1107,7 @@ def generate_pdf_report(user_prompt, system_prompt, results, stats, ratings, eva
     except Exception:
         return pdf_output.encode('latin-1', 'replace')
 
-def generate_testset_pdf_report(chart_paths):
+def generate_testset_pdf_report(chart_paths, rankings=None):
     pdf = PDFReport()
     pdf.alias_nb_pages()
 
@@ -1163,9 +1163,9 @@ def generate_testset_pdf_report(chart_paths):
          pdf.cell(0, 10, 'Testset Performance Report', 0, 1, 'C')
     pdf.ln(10)
 
-    # Charts
+    # Charts and Rankings
     for title, path in chart_paths.items():
-        if pdf.get_y() > 200:
+        if pdf.get_y() > 180: # Check for space for chart + rankings
             pdf.add_page()
             
         if unicode_font_registered:
@@ -1181,6 +1181,7 @@ def generate_testset_pdf_report(chart_paths):
         except:
              pdf.cell(0, 10, _safe_text(title), 0, 1)
 
+        # Draw Chart
         try:
             pdf.image(path, x=10, w=190)
         except Exception as e:
@@ -1189,6 +1190,31 @@ def generate_testset_pdf_report(chart_paths):
             else:
                 pdf.set_font("Helvetica", 'I', 10)
             pdf.cell(0, 10, _safe_text(f"Error adding chart: {str(e)}"), 0, 1)
+        
+        pdf.ln(5)
+
+        # Add ranking table if available for this chart
+        if rankings and title in rankings:
+            if unicode_font_registered:
+                pdf.set_font('DejaVu', '', 10)
+            else:
+                pdf.set_font("Helvetica", '', 10)
+            
+            # Table Header
+            pdf.set_fill_color(240, 240, 240)
+            pdf.cell(15, 8, "Rank", 1, 0, 'C', True)
+            pdf.cell(80, 8, "Model", 1, 0, 'L', True)
+            pdf.cell(95, 8, "Average Stats", 1, 1, 'L', True)
+            
+            # Table Rows
+            for idx, row in enumerate(rankings[title], 1):
+                model_name = row.get('model', '')
+                stats_str = row.get('stats', '')
+                
+                pdf.cell(15, 8, str(idx), 1, 0, 'C')
+                pdf.cell(80, 8, _safe_text(model_name), 1, 0, 'L')
+                pdf.cell(95, 8, _safe_text(stats_str), 1, 1, 'L')
+                
         pdf.ln(10)
         
     pdf_output = pdf.output(dest='S')
@@ -1613,7 +1639,7 @@ progress_bar = st.empty()
 streaming_section = st.empty()
 
 # Define the model processing function
-def process_models(selected_models, system_prompt_text=None, user_prompt_text=None):
+def process_models(selected_models, system_prompt_text=None, user_prompt_text=None, iteration_info=None):
     """Process all selected models and collect responses with performance stats."""
     # Default to globol user_prompt if not provided
     if user_prompt_text is None:
@@ -1639,7 +1665,10 @@ def process_models(selected_models, system_prompt_text=None, user_prompt_text=No
         try:
             if enable_streaming:
                 # Display progress
-                progress_container.markdown(f"**Model {i+1}/{len(selected_models)}:** {model} | Starting...")
+                msg = f"**Model {i+1}/{len(selected_models)}:** {model} | Starting..."
+                if iteration_info:
+                    msg = f"**{iteration_info}** | " + msg
+                progress_container.markdown(msg)
                 progress_bar.progress((i) / len(selected_models))
                 
                 # Reset streaming display for next model
@@ -1655,7 +1684,10 @@ def process_models(selected_models, system_prompt_text=None, user_prompt_text=No
                 )
             else:
                 # Show processing message when not streaming
-                progress_container.markdown(f"**Generating {i+1}/{len(selected_models)}:** {model}")
+                msg = f"**Generating {i+1}/{len(selected_models)}:** {model}"
+                if iteration_info:
+                    msg = f"**{iteration_info}** | " + msg
+                progress_container.markdown(msg)
                 progress_bar.progress((i) / len(selected_models))
                 response, stats = query_model(model, user_prompt_text, system_prompt_text, temperature)
             
@@ -1780,11 +1812,13 @@ if compare_button:
                 st.session_state.results = {}
                 st.session_state.performance_stats = {}
 
+                iteration_info = f"Test {idx}/{len(testset_rows)}"
+
                 if not enable_streaming:
-                    with st.spinner(f"Iteration {idx}/{len(testset_rows)}: Generating responses..."):
-                        process_models(selected_models, system_prompt, iter_prompt)
+                    with st.spinner(f"{iteration_info}: Generating responses..."):
+                        process_models(selected_models, system_prompt, iter_prompt, iteration_info=iteration_info)
                 else:
-                    process_models(selected_models, system_prompt, iter_prompt)
+                    process_models(selected_models, system_prompt, iter_prompt, iteration_info=iteration_info)
 
                 # Capture results for this iteration
                 iter_results = copy.deepcopy(st.session_state.results)
@@ -2036,32 +2070,60 @@ if st.session_state.results:
                 if data['ttft']: row['Time to First Token (seconds)'] = sum(data['ttft']) / len(data['ttft'])
                 if data['tps']: row['Tokens per Second'] = sum(data['tps']) / len(data['tps'])
                 if data['accurate']: row['Accuracy'] = sum(data['accurate']) / len(data['accurate'])
+                # Add the raw count here
+                if data['accurate']: row['Accuracy_Count'] = f"({sum(data['accurate'])}/{len(data['accurate'])})"
+                
                 agg_data.append(row)
             
             agg_df = pd.DataFrame(agg_data)
+            
+            # Prepare rankings dict
+            rankings = {}
             
             if not agg_df.empty:
                 # 1. Total time & Time to first token (stacked bar chart)
                 try:
                     time_fig = create_stacked_time_chart(agg_df)
                     if time_fig:
+                        title = 'Average Latency Distribution (Stacked)'
                         with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp:
                             time_fig.savefig(tmp.name, format='png', dpi=150, bbox_inches='tight')
-                            chart_paths['Average Latency Distribution (Stacked)'] = tmp.name
+                            chart_paths[title] = tmp.name
                         plt.close(time_fig)
+                        
+                        # Rank by Total Time (lower is better)
+                        if 'Total Time (seconds)' in agg_df.columns:
+                            sorted_df = agg_df.sort_values(by='Total Time (seconds)', ascending=True)
+                            rankings[title] = []
+                            for _, r in sorted_df.iterrows():
+                                stats_str = f"Total: {r['Total Time (seconds)']:.2f}s"
+                                if 'Time to First Token (seconds)' in r:
+                                    stats_str += f" | TTFT: {r['Time to First Token (seconds)']:.3f}s"
+                                rankings[title].append({'model': r['Model'], 'stats': stats_str})
+
                 except Exception as e:
                     st.warning(f"Could not generate stacked time chart: {e}")
                 
                 # 2. Tokens per second
                 if 'Tokens per Second' in agg_df.columns:
                     try:
-                        # Reusing create_speed_chart but with aggregated DF. It expects 'Model' and 'Tokens per Second' cols which we have.
                         speed_fig = create_speed_chart(agg_df)
                         if speed_fig:
+                            title = 'Average Speed (Tokens/s)'
                             with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp:
                                 speed_fig.savefig(tmp.name, format='png', dpi=150, bbox_inches='tight')
-                                chart_paths['Average Speed (Tokens/s)'] = tmp.name
+                                chart_paths[title] = tmp.name
                             plt.close(speed_fig)
+                            
+                            # Rank by Speed (higher is better)
+                            sorted_df = agg_df.sort_values(by='Tokens per Second', ascending=False)
+                            rankings[title] = []
+                            for _, r in sorted_df.iterrows():
+                                rankings[title].append({
+                                    'model': r['Model'], 
+                                    'stats': f"{r['Tokens per Second']:.1f} tok/s"
+                                })
+
                     except Exception as e:
                         st.warning(f"Could not generate speed chart: {e}")
                 
@@ -2070,14 +2132,27 @@ if st.session_state.results:
                     try:
                         acc_fig = create_testset_accuracy_chart(agg_df)
                         if acc_fig:
+                            title = 'Accuracy'
                             with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp:
                                 acc_fig.savefig(tmp.name, format='png', dpi=150, bbox_inches='tight')
-                                chart_paths['Accuracy'] = tmp.name
+                                chart_paths[title] = tmp.name
                             plt.close(acc_fig)
+                            
+                            # Rank by Accuracy (higher is better)
+                            sorted_df = agg_df.sort_values(by='Accuracy', ascending=False)
+                            rankings[title] = []
+                            for _, r in sorted_df.iterrows():
+                                acc_pct = r['Accuracy'] * 100
+                                count_str = r.get('Accuracy_Count', '')
+                                rankings[title].append({
+                                    'model': r['Model'], 
+                                    'stats': f"{acc_pct:.1f}% {count_str}"
+                                })
+
                     except Exception as e:
                          st.warning(f"Could not generate accuracy chart: {e}")
             
-            pdf_bytes = generate_testset_pdf_report(chart_paths)
+            pdf_bytes = generate_testset_pdf_report(chart_paths, rankings)
 
         else:
             # Speed Chart
