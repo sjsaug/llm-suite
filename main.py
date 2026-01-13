@@ -10,6 +10,8 @@ import json
 import configparser
 import os
 import time
+import csv
+import copy
 from fpdf import FPDF
 from langchain_core.prompts import ChatPromptTemplate
 from dataclasses import dataclass, field, asdict
@@ -448,6 +450,95 @@ def extract_streaming_final_stats(chunk_data: dict, stats: PerformanceStats) -> 
     except Exception as e:
         st.session_state.debug_info.append(f"Error extracting streaming stats: {str(e)}")
     return stats
+
+
+def parse_testset_file(uploaded_file, input_vars: List[str]) -> List[Dict[str, str]]:
+    """Parse a testset file into a list of variable dicts.
+    Accepts CSV or simple comma-separated lines. If the file has a header matching
+    the input variable names, that will be used. Otherwise values are mapped by
+    position to `input_vars`.
+    """
+    if not uploaded_file:
+        return []
+
+    # Read bytes and decode
+    try:
+        content = uploaded_file.getvalue().decode('utf-8')
+    except Exception:
+        try:
+            content = uploaded_file.getvalue().decode('latin-1')
+        except Exception:
+            content = str(uploaded_file.getvalue())
+
+    rows = []
+    reader = csv.reader([line for line in content.splitlines() if line.strip()])
+    # Peek first row to see if header matches input_vars
+    all_lines = list(reader)
+    if not all_lines:
+        return []
+
+    # If first row contains headers that match input_vars, use header mapping
+    first = [c.strip() for c in all_lines[0]]
+    mapped_start = 0
+    if set([v for v in first]) >= set(input_vars) or set(input_vars) <= set(first):
+        # treat first as header
+        headers = first
+        mapped_start = 1
+        for line in all_lines[1:]:
+            if not any(s.strip() for s in line):
+                continue
+            vals = [v.strip() for v in line]
+            row = {}
+            for h, v in zip(headers, vals):
+                if h in input_vars:
+                    row[h] = v
+            # Fill missing input_vars with empty strings
+            for iv in input_vars:
+                if iv not in row:
+                    row[iv] = ""
+            rows.append(row)
+    else:
+        # No header: map by position to input_vars
+        for line in all_lines:
+            if not any(s.strip() for s in line):
+                continue
+            vals = [v.strip() for v in line]
+            if len(vals) < len(input_vars):
+                # pad with empty strings
+                vals += [""] * (len(input_vars) - len(vals))
+            row = {var: vals[idx] for idx, var in enumerate(input_vars)}
+            rows.append(row)
+
+    return rows
+
+
+def aggregate_testset_results_to_dataframe(testset_results: List[Dict]) -> pd.DataFrame:
+    """Flatten testset results into a table suitable for CSV export.
+    Each row corresponds to a single (iteration, model) pair.
+    """
+    records = []
+    for idx, item in enumerate(testset_results, start=1):
+        vars_map = item.get('vars', {})
+        results = item.get('results', {})
+        perf = item.get('performance_stats', {})
+        for model, resp in results.items():
+            stats = perf.get(model)
+            rec = {
+                'iteration': idx,
+                **{f'var_{k}': v for k, v in vars_map.items()},
+                'model': model,
+                'response': resp,
+                'length': len(resp) if resp else 0,
+            }
+            if stats:
+                rec.update({
+                    'completion_tokens': stats.get('completion_tokens', ''),
+                    'total_time': stats.get('total_time', ''),
+                })
+            records.append(rec)
+    if not records:
+        return pd.DataFrame()
+    return pd.DataFrame.from_records(records)
 
 # --- Function to evaluate model responses ---
 def evaluate_responses(evaluation_model: str, responses: dict, user_prompt: str, evaluation_prompt: str, temperature: float = 0.7) -> str:
@@ -1164,6 +1255,22 @@ if user_prompt:
                         f"Value for {{{var}}}", 
                         key=key
                     )
+            # Testset file upload for iterative runs
+            st.markdown("#### Prompt Variable Testset (optional)")
+            uploaded_testset = st.file_uploader("Upload testset file (CSV or lines of comma-separated values)", type=['csv','txt'], key='testset_uploader')
+            testset_rows = []
+            if uploaded_testset:
+                try:
+                    testset_rows = parse_testset_file(uploaded_testset, input_vars)
+                    st.info(f"Parsed {len(testset_rows)} rows from testset file")
+                    if len(testset_rows) > 0:
+                        # show first 3 rows as preview
+                        preview_df = pd.DataFrame(testset_rows[:5])
+                        st.dataframe(preview_df, use_container_width=True)
+                except Exception as e:
+                    st.error(f"Error parsing testset file: {e}")
+            # Store parsed rows in session for later use
+            st.session_state['prompt_testset_rows'] = testset_rows
     except Exception as e:
         # Just catch it, we'll display error if they try to run
         template_error = f"Error parsing prompt template: {str(e)}"
@@ -1270,25 +1377,31 @@ if compare_button:
     # --- Check for variable errors ---
     validation_error = None
     final_user_prompt = user_prompt
+    # If a testset was uploaded, we should not require individual prompt variable inputs
+    testset_rows = st.session_state.get('prompt_testset_rows', []) or []
     
     if prompt_template:
-        missing_vars = [var for var, val in user_prompt_vars.items() if not val]
-        
-        if missing_vars:
-            validation_error = f"Missing values for prompt variables: {', '.join(missing_vars)}"
+        # If a testset is present, skip per-variable validation here —
+        # iterations will build prompts from each testset row.
+        if not testset_rows:
+            missing_vars = [var for var, val in user_prompt_vars.items() if not val]
+            if missing_vars:
+                validation_error = f"Missing values for prompt variables: {', '.join(missing_vars)}"
+            else:
+                try:
+                    # Format the user prompt
+                    # ChatPromptTemplate.format returns a string if the template produces a string
+                    messages = prompt_template.format_messages(**user_prompt_vars)
+                    # Extract content from the first message
+                    if messages and hasattr(messages[0], 'content'):
+                        final_user_prompt = messages[0].content
+                    else:
+                        final_user_prompt = prompt_template.format(**user_prompt_vars)
+                except Exception as e:
+                    validation_error = f"Error formatting prompt: {str(e)}"
         else:
-            try:
-                # Format the user prompt
-                # ChatPromptTemplate.format returns a string if the template produces a string
-                messages = prompt_template.format_messages(**user_prompt_vars)
-                # Extract content from the first message
-                if messages and hasattr(messages[0], 'content'):
-                    final_user_prompt = messages[0].content
-                else:
-                     final_user_prompt = prompt_template.format(**user_prompt_vars)
-            
-            except Exception as e:
-                validation_error = f"Error formatting prompt: {str(e)}"
+            # When using a testset, we won't build a single final_user_prompt here.
+            final_user_prompt = user_prompt
 
     if validation_error:
         st.error(validation_error)
@@ -1319,12 +1432,56 @@ if compare_button:
                 st.info("Stopping inference... please wait.")
                 st.rerun()
                 
-        # Process models with or without spinner based on streaming setting
-        if not enable_streaming:
-            with st.spinner("Generating responses..."):
-                process_models(selected_models, system_prompt, final_user_prompt)
+        # Determine if a testset was uploaded and parsed
+        testset_rows = st.session_state.get('prompt_testset_rows', []) or []
+
+        if testset_rows:
+            st.session_state.testset_results = []
+            st.info(f"Running {len(testset_rows)} prompt iterations from testset")
+            # Iterate through each variable set
+            for idx, vars_map in enumerate(testset_rows, start=1):
+                if st.session_state.stop_inference:
+                    st.session_state.debug_info.append("Testset run stopped by user")
+                    break
+
+                # Build the prompt for this iteration
+                try:
+                    messages = prompt_template.format_messages(**vars_map)
+                    if messages and hasattr(messages[0], 'content'):
+                        iter_prompt = messages[0].content
+                    else:
+                        iter_prompt = prompt_template.format(**vars_map)
+                except Exception as e:
+                    st.error(f"Error formatting prompt for iteration {idx}: {e}")
+                    continue
+
+                # Clear previous results and run models for this single prompt
+                st.session_state.results = {}
+                st.session_state.performance_stats = {}
+
+                if not enable_streaming:
+                    with st.spinner(f"Iteration {idx}/{len(testset_rows)}: Generating responses..."):
+                        process_models(selected_models, system_prompt, iter_prompt)
+                else:
+                    process_models(selected_models, system_prompt, iter_prompt)
+
+                # Capture results for this iteration
+                iter_results = copy.deepcopy(st.session_state.results)
+                iter_stats = {m: s.to_dict() for m, s in st.session_state.performance_stats.items()}
+                st.session_state.testset_results.append({
+                    'vars': vars_map,
+                    'results': iter_results,
+                    'performance_stats': iter_stats
+                })
+
+            st.success("Testset processing complete")
         else:
-            process_models(selected_models, system_prompt, final_user_prompt)
+            # Process models with or without spinner based on streaming setting
+            if not enable_streaming:
+                with st.spinner("Generating responses..."):
+                    process_models(selected_models, system_prompt, final_user_prompt)
+            else:
+                process_models(selected_models, system_prompt, final_user_prompt)
 
 # Display results
 if st.session_state.results:
@@ -1566,6 +1723,22 @@ if st.session_state.results:
             )
     except Exception as e:
         st.error(f"Error generating PDF: {e}")
+
+        # If testset was run, provide aggregated results and export
+        testset_results = st.session_state.get('testset_results', [])
+        if testset_results:
+            st.markdown("### Testset Results Summary")
+            agg_df = aggregate_testset_results_to_dataframe(testset_results)
+            if not agg_df.empty:
+                st.dataframe(agg_df, use_container_width=True)
+                csv_data = agg_df.to_csv(index=False)
+                st.download_button(
+                    label="Download Testset Results as CSV",
+                    data=csv_data,
+                    file_name="testset_results.csv",
+                    mime="text/csv",
+                    use_container_width=True
+                )
 
     # Tabs for different view modes
     tab1, tab2 = st.tabs(["Side by Side", "Stacked"])
