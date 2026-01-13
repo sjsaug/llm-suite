@@ -489,13 +489,26 @@ def parse_testset_file(uploaded_file, input_vars: List[str]) -> List[Dict[str, s
                 continue
             vals = [v.strip() for v in line]
             row = {}
+            temp_expected = []
+            
+            # Map known variables
             for h, v in zip(headers, vals):
                 if h in input_vars:
                     row[h] = v
+                else: 
+                     # Collect any columns not in input_vars as potential expected responses
+                     # (Assuming simple CSV structure where extra cols are targets)
+                     if v.strip():
+                         temp_expected.append(v.strip())
+
             # Fill missing input_vars with empty strings
             for iv in input_vars:
                 if iv not in row:
                     row[iv] = ""
+            
+            if temp_expected:
+                row['_expected_responses'] = temp_expected
+                
             rows.append(row)
     else:
         # No header: map by position to input_vars
@@ -507,6 +520,13 @@ def parse_testset_file(uploaded_file, input_vars: List[str]) -> List[Dict[str, s
                 # pad with empty strings
                 vals += [""] * (len(input_vars) - len(vals))
             row = {var: vals[idx] for idx, var in enumerate(input_vars)}
+            
+            # Capture any remaining columns as expected responses
+            if len(vals) > len(input_vars):
+                expected = [x.strip() for x in vals[len(input_vars):] if x.strip()]
+                if expected:
+                    row['_expected_responses'] = expected
+            
             rows.append(row)
 
     return rows
@@ -521,15 +541,26 @@ def aggregate_testset_results_to_dataframe(testset_results: List[Dict]) -> pd.Da
         vars_map = item.get('vars', {})
         results = item.get('results', {})
         perf = item.get('performance_stats', {})
+        validation = item.get('validation', {})
+
+        # Clean vars map for display (remove internal keys)
+        display_vars = {k: v for k, v in vars_map.items() if not k.startswith('_')}
+        expected_responses = vars_map.get('_expected_responses', [])
+
         for model, resp in results.items():
             stats = perf.get(model)
             rec = {
                 'iteration': idx,
-                **{f'var_{k}': v for k, v in vars_map.items()},
+                **{f'var_{k}': v for k, v in display_vars.items()},
                 'model': model,
                 'response': resp,
                 'length': len(resp) if resp else 0,
             }
+
+            if expected_responses:
+                rec['expected_response'] = " | ".join(expected_responses)
+                rec['is_accurate'] = validation.get(model, False)
+
             if stats:
                 rec.update({
                     'completion_tokens': stats.get('completion_tokens', ''),
@@ -1468,10 +1499,37 @@ if compare_button:
                 # Capture results for this iteration
                 iter_results = copy.deepcopy(st.session_state.results)
                 iter_stats = {m: s.to_dict() for m, s in st.session_state.performance_stats.items()}
+                
+                # Check accuracy against expected responses
+                iter_validation = {}
+                if '_expected_responses' in vars_map:
+                    expected_responses = vars_map['_expected_responses']
+                    # Ensure it's a list
+                    if isinstance(expected_responses, str):
+                        expected_responses = [expected_responses]
+                        
+                    for m, response in iter_results.items():
+                        # Clean response
+                        # We use a normalized exact match to avoid false positives (e.g. "test123, test 123" matching "test123")
+                        # and strictly check for the answer content.
+                        def normalize_text(text):
+                            if not text: return ""
+                            # Remove non-alphanumeric characters (keep only \w and \s) to ignore punctuation
+                            # This allows "Answer." to match "Answer"
+                            text = re.sub(r'[^\w\s]', '', text).lower()
+                            return re.sub(r'\s+', ' ', text).strip()
+
+                        r_text_norm = normalize_text(response)
+                        
+                        # Check strict equality against any valid expected response
+                        is_valid = any(normalize_text(exp) == r_text_norm for exp in expected_responses if exp and exp.strip())
+                        iter_validation[m] = is_valid
+
                 st.session_state.testset_results.append({
                     'vars': vars_map,
                     'results': iter_results,
-                    'performance_stats': iter_stats
+                    'performance_stats': iter_stats,
+                    'validation': iter_validation
                 })
 
             st.success("Testset processing complete")

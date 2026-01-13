@@ -1,4 +1,4 @@
-quantum physics, loud
-space, all capital letters
-fortnite, quiet
-call of duty, aggravated
+quantum physics, loud, quantum physics loud, quantumphysicsloud
+space, all capital letters, space all capital letters, spaceallcapitalletters
+fortnite, quiet, fortnite quiet, fortnitequiet
+test, 123, test 123, test123
