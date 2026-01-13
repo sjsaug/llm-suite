@@ -13,6 +13,11 @@ import time
 import csv
 import copy
 from fpdf import FPDF
+try:
+    from fpdf.enums import XPos, YPos
+except ImportError:
+    # Fallback for older fpdf2 versions or if using fpdf 1.7.x
+    XPos, YPos = None, None
 from langchain_core.prompts import ChatPromptTemplate
 from dataclasses import dataclass, field, asdict
 from typing import Dict, List, Any
@@ -701,16 +706,80 @@ def create_accuracy_chart(model_ratings):
     plt.tight_layout()
     return fig
 
+def create_stacked_time_chart(stats_df):
+    """Create a stacked bar chart for Time to First Token and Generation Time."""
+    fig, ax = plt.subplots(figsize=(10, 6))
+    models = stats_df["Model"].tolist()
+    
+    ttft = stats_df["Time to First Token (seconds)"].tolist()
+    # Generation time for the purpose of stacking is Total Time - TTFT
+    # Ensure no negative values if TTFT > Total Time (shouldn't happen but safety first)
+    gen_time = [max(0, total - first) for total, first in zip(stats_df["Total Time (seconds)"], ttft)]
+    
+    # Plot TTFT at bottom
+    p1 = ax.bar(models, ttft, label='Time to First Token', color='#FF9800')
+    # Plot Generation Time on top of TTFT
+    p2 = ax.bar(models, gen_time, bottom=ttft, label='Total Time (stacked)', color='#2196F3')
+    
+    ax.set_xlabel('Model')
+    ax.set_ylabel('Time (seconds)')
+    ax.set_title('Average Latency Distribution')
+    ax.legend()
+    
+    if len(models) > 3:
+        plt.xticks(rotation=45, ha='right')
+    
+    plt.tight_layout()
+    return fig
+
+def create_testset_accuracy_chart(agg_df):
+    """Create accuracy chart based on percentage of accurate responses."""
+    if 'Accuracy' not in agg_df.columns:
+        return None
+        
+    fig, ax = plt.subplots(figsize=(10, 6))
+    models = agg_df["Model"].tolist()
+    # Convert 0-1 range to 0-100
+    scores = [x * 100 for x in agg_df["Accuracy"].tolist()]
+    
+    bars = ax.bar(models, scores, color='#4CAF50')
+    ax.set_ylabel('Accuracy (%)')
+    ax.set_title('Model Accuracy (Testset)')
+    ax.set_ylim(0, 100) # Percentage
+    
+    for bar, score in zip(bars, scores):
+        ax.text(bar.get_x() + bar.get_width()/2, score + 1,
+               f'{score:.1f}%', ha='center', va='bottom', fontsize=9)
+               
+    if len(models) > 3:
+        plt.xticks(rotation=45, ha='right')
+        
+    plt.tight_layout()
+    return fig
+
 class PDFReport(FPDF):
     def header(self):
         self.set_font('Helvetica', 'B', 15)
-        self.cell(0, 10, 'Comparison Report', 0, 1, 'C')
+        # Check if XPos and YPos are available (handled in import)
+        try:
+            if 'XPos' in globals() and XPos:
+                self.cell(0, 10, 'Comparison Report', new_x=XPos.LMARGIN, new_y=YPos.NEXT, align='C')
+            else:
+                self.cell(0, 10, 'Comparison Report', 0, 1, 'C')
+        except Exception:
+             self.cell(0, 10, 'Comparison Report', 0, 1, 'C')
         self.ln(5)
 
     def footer(self):
         self.set_y(-15)
         self.set_font('Helvetica', 'I', 8)
-        self.cell(0, 10, f'Page {self.page_no()}/{{nb}}', 0, 0, 'C')
+        try:
+            if 'XPos' in globals() and XPos:
+                self.cell(0, 10, f'Page {self.page_no()}/{{nb}}', align='C')
+            else:
+                self.cell(0, 10, f'Page {self.page_no()}/{{nb}}', 0, 0, 'C')
+        except:
+             self.cell(0, 10, f'Page {self.page_no()}/{{nb}}', 0, 0, 'C')
 
 def generate_pdf_report(user_prompt, system_prompt, results, stats, ratings, evaluation, prompt_vars=None, chart_paths=None):
     pdf = PDFReport()
@@ -748,33 +817,54 @@ def generate_pdf_report(user_prompt, system_prompt, results, stats, ratings, eva
     def _safe_text(txt: str) -> str:
         if txt is None:
             return ""
+        
+        s = str(txt)
+        
+        # Always break extremely long words/sequences to prevent FPDF 
+        # "Not enough horizontal space" errors
+        def _break_long_words(text: str, maxlen: int = 30) -> str:
+            return re.sub(r"(\S{%d,})" % maxlen,
+                            lambda m: ' '.join([m.group(0)[i:i+maxlen] for i in range(0, len(m.group(0)), maxlen)]),
+                            text)
+        
+        s = _break_long_words(s, maxlen=30)
+
         if unicode_font_registered:
-            return str(txt)
+            return s
+            
         try:
-            s = str(txt)
             # If using non-unicode core fonts, ensure very long unbroken
             # sequences are split so FPDF can wrap them on all platforms
-            def _break_long_words(text: str, maxlen: int = 80) -> str:
-                return re.sub(r"(\S{%d,})" % maxlen,
-                              lambda m: ' '.join([m.group(0)[i:i+maxlen] for i in range(0, len(m.group(0)), maxlen)]),
-                              text)
-
-            s = _break_long_words(s, maxlen=80)
             return s.encode('latin-1', 'replace').decode('latin-1')
         except Exception:
-            return str(txt)
+            return s
     
     # Prompt Section
     if unicode_font_registered:
         pdf.set_font('DejaVu', '', 12)
     else:
         pdf.set_font("Helvetica", 'B', 12)
-    pdf.cell(0, 10, "User Prompt:", 0, 1)
+    
+    # Use explicit new_x/new_y if available in recent fpdf2, otherwise fallback
+    try:
+        if XPos and YPos:
+            pdf.cell(0, 10, "User Prompt:", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        else:
+            pdf.cell(0, 10, "User Prompt:", 0, 1)
+    except Exception:
+        pdf.cell(0, 10, "User Prompt:", 0, 1)
+
     if unicode_font_registered:
         pdf.set_font('DejaVu', '', 11)
     else:
         pdf.set_font("Helvetica", size=11)
-    pdf.multi_cell(0, 6, _safe_text(user_prompt))
+    
+    # Set X to left margin before printing long text blocks
+    pdf.set_x(pdf.l_margin)
+    try:
+        pdf.multi_cell(0, 6, _safe_text(user_prompt))
+    except Exception:
+         pdf.cell(0, 6, "User prompt too long to display.", 0, 1)
     pdf.ln(5)
 
     # Prompt Variables Section
@@ -783,13 +873,25 @@ def generate_pdf_report(user_prompt, system_prompt, results, stats, ratings, eva
             pdf.set_font('DejaVu', '', 12)
         else:
             pdf.set_font("Helvetica", 'B', 12)
-        pdf.cell(0, 10, "Prompt Variables:", 0, 1)
+        try:
+            if XPos and YPos:
+                 pdf.cell(0, 10, "Prompt Variables:", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+            else:
+                 pdf.cell(0, 10, "Prompt Variables:", 0, 1)
+        except Exception:
+            pdf.cell(0, 10, "Prompt Variables:", 0, 1)
+
         if unicode_font_registered:
             pdf.set_font('DejaVu', '', 11)
         else:
             pdf.set_font("Helvetica", size=11)
+        
+        pdf.set_x(pdf.l_margin)
         for var, val in prompt_vars.items():
-            pdf.multi_cell(0, 6, _safe_text(f"{var}: {val}"))
+            try:
+                pdf.multi_cell(0, 6, _safe_text(f"{var}: {val}"))
+            except Exception:
+                pdf.cell(0, 6, _safe_text(f"{var}: [Content error]"), 0, 1)
         pdf.ln(5)
 
     # Charts Section (New)
@@ -799,7 +901,14 @@ def generate_pdf_report(user_prompt, system_prompt, results, stats, ratings, eva
             pdf.add_page()
             
         pdf.set_font("Helvetica", 'B', 12)
-        pdf.cell(0, 10, "Performance & Accuracy Charts:", 0, 1)
+        try:
+            if XPos and YPos:
+                pdf.cell(0, 10, "Performance & Accuracy Charts:", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+            else:
+                pdf.cell(0, 10, "Performance & Accuracy Charts:", 0, 1)
+        except:
+             pdf.cell(0, 10, "Performance & Accuracy Charts:", 0, 1)
+
         pdf.ln(2)
         
         for title, path in chart_paths.items():
@@ -809,7 +918,15 @@ def generate_pdf_report(user_prompt, system_prompt, results, stats, ratings, eva
                 pdf.set_font('DejaVu', '', 11)
             else:
                 pdf.set_font("Helvetica", 'B', 11)
-            pdf.cell(0, 10, _safe_text(title), 0, 1)
+            
+            try:
+                if XPos and YPos:
+                     pdf.cell(0, 10, _safe_text(title), new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+                else:
+                     pdf.cell(0, 10, _safe_text(title), 0, 1)
+            except:
+                 pdf.cell(0, 10, _safe_text(title), 0, 1)
+
             try:
                 # Adjust image width to fit page mostly
                 # A4 width is 210mm. Margins approx 10mm each side -> 190mm width
@@ -829,13 +946,25 @@ def generate_pdf_report(user_prompt, system_prompt, results, stats, ratings, eva
             pdf.set_font('DejaVu', '', 12)
         else:
             pdf.set_font("Helvetica", 'B', 12)
-        pdf.cell(0, 10, "System Prompt:", 0, 1)
+            
+        try:
+            if XPos and YPos:
+                pdf.cell(0, 10, "System Prompt:", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+            else:
+                pdf.cell(0, 10, "System Prompt:", 0, 1)
+        except:
+            pdf.cell(0, 10, "System Prompt:", 0, 1)
 
         if unicode_font_registered:
             pdf.set_font('DejaVu', '', 11)
         else:
             pdf.set_font("Helvetica", size=11)
-        pdf.multi_cell(0, 6, _safe_text(system_prompt))
+            
+        pdf.set_x(pdf.l_margin)
+        try:
+            pdf.multi_cell(0, 6, _safe_text(system_prompt))
+        except:
+             pdf.cell(0, 6, "System prompt too long to display.", 0, 1)
         pdf.ln(5)
         
     # Models Section
@@ -850,14 +979,29 @@ def generate_pdf_report(user_prompt, system_prompt, results, stats, ratings, eva
             pdf.set_font('DejaVu', '', 14)
         else:
             pdf.set_font("Helvetica", 'B', 14)
-        pdf.cell(0, 10, _safe_text(f"Model: {model}"), 0, 1)
+            
+        try:
+            if XPos and YPos:
+                pdf.cell(0, 10, _safe_text(f"Model: {model}"), new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+            else:
+                pdf.cell(0, 10, _safe_text(f"Model: {model}"), 0, 1)
+        except:
+             pdf.cell(0, 10, _safe_text(f"Model: {model}"), 0, 1)
 
         # Stats & Accuracy
         if unicode_font_registered:
             pdf.set_font('DejaVu', '', 10)
         else:
             pdf.set_font("Helvetica", 'B', 10)
-        pdf.cell(0, 6, _safe_text("Performance & Accuracy:"), 0, 1)
+        
+        try:
+            if 'XPos' in globals() and XPos:
+                pdf.cell(0, 6, _safe_text("Performance & Accuracy:"), new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+            else:
+                pdf.cell(0, 6, _safe_text("Performance & Accuracy:"), 0, 1)
+        except:
+             pdf.cell(0, 6, _safe_text("Performance & Accuracy:"), 0, 1)
+
         if unicode_font_registered:
             pdf.set_font('DejaVu', '', 10)
         else:
@@ -869,7 +1013,15 @@ def generate_pdf_report(user_prompt, system_prompt, results, stats, ratings, eva
             stats_text = f"Time: {s.total_time:.2f}s | Speed: {s.tokens_per_second:.1f} t/s | TTFT: {s.time_to_first_token:.3f}s | Tokens: {s.completion_tokens}"
 
         rating = ratings.get(model, "N/A")
-        pdf.cell(0, 6, _safe_text(f"{stats_text} | Accuracy: {rating}"), 0, 1)
+        
+        try:
+            if 'XPos' in globals() and XPos:
+                pdf.cell(0, 6, _safe_text(f"{stats_text} | Accuracy: {rating}"), new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+            else:
+                 pdf.cell(0, 6, _safe_text(f"{stats_text} | Accuracy: {rating}"), 0, 1)
+        except:
+             pdf.cell(0, 6, _safe_text(f"{stats_text} | Accuracy: {rating}"), 0, 1)
+
         pdf.ln(5)
 
         # Response
@@ -877,13 +1029,37 @@ def generate_pdf_report(user_prompt, system_prompt, results, stats, ratings, eva
             pdf.set_font('DejaVu', '', 12)
         else:
             pdf.set_font("Helvetica", 'B', 12)
-        pdf.cell(0, 10, _safe_text("Response:"), 0, 1)
+            
+        try:
+            if 'XPos' in globals() and XPos:
+                 pdf.cell(0, 10, _safe_text("Response:"), new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+            else:
+                 pdf.cell(0, 10, _safe_text("Response:"), 0, 1)
+        except:
+             pdf.cell(0, 10, _safe_text("Response:"), 0, 1)
+
         if unicode_font_registered:
             pdf.set_font('DejaVu', '', 10)
         else:
             pdf.set_font("Helvetica", size=10)
 
-        pdf.multi_cell(0, 5, _safe_text(response))
+        # Ensure we are starting at the left margin to maximize available width
+        pdf.set_x(pdf.l_margin)
+        
+        try:
+            pdf.multi_cell(0, 5, _safe_text(response))
+        except Exception as e:
+            # Fallback for spacing errors: simplify text aggressively
+            try:
+                # Try printing just a safe snippet
+                safe_snippet = _safe_text(response[:500]) if response else ""
+                if 'XPos' in globals() and XPos:
+                     pdf.multi_cell(0, 5, f"Preview (rendering error): {safe_snippet}...", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+                else:
+                     pdf.multi_cell(0, 5, f"Preview (rendering error): {safe_snippet}...")
+            except:
+                pass 
+        
         pdf.ln(5)
 
     # Evaluation Section
@@ -893,18 +1069,132 @@ def generate_pdf_report(user_prompt, system_prompt, results, stats, ratings, eva
             pdf.set_font('DejaVu', '', 14)
         else:
             pdf.set_font("Helvetica", 'B', 14)
-        pdf.cell(0, 10, _safe_text("Evaluation Result"), 0, 1)
+        try:
+            if 'XPos' in globals() and XPos:
+                 pdf.cell(0, 10, _safe_text("Evaluation Result"), new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+            else:
+                 pdf.cell(0, 10, _safe_text("Evaluation Result"), 0, 1)
+        except:
+             pdf.cell(0, 10, _safe_text("Evaluation Result"), 0, 1)
+
         if unicode_font_registered:
             pdf.set_font('DejaVu', '', 10)
         else:
             pdf.set_font("Helvetica", size=10)
-        pdf.multi_cell(0, 5, _safe_text(evaluation))
-    # Return bytes for the PDF. `output(dest='S')` returns a string in FPDF,
-    # so encode it to bytes. Prefer Latin-1 encoding as FPDF uses single-byte
-    # encodings internally; fall back to a replacement strategy if needed.
+            
+        try:
+            pdf.set_x(pdf.l_margin)
+            pdf.multi_cell(0, 5, _safe_text(evaluation))
+        except Exception:
+             try:
+                 if 'XPos' in globals() and XPos:
+                     pdf.cell(0, 5, "[Evaluation text could not be rendered due to spacing limits]", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+                 else:
+                     pdf.cell(0, 5, "[Evaluation text could not be rendered due to spacing limits]", 0, 1)
+             except:
+                 pass
+
+    # Return bytes for the PDF.
+    # fpdf2 `output()` may return bytes, bytearray, or string depending on version/args.
     pdf_output = pdf.output(dest='S')
-    if isinstance(pdf_output, bytes):
-        return pdf_output
+    
+    if isinstance(pdf_output, (bytes, bytearray)):
+        return bytes(pdf_output)
+        
+    # If it's a string (older FPDF), encode it.
+    try:
+        return pdf_output.encode('latin-1')
+    except Exception:
+        return pdf_output.encode('latin-1', 'replace')
+
+def generate_testset_pdf_report(chart_paths):
+    pdf = PDFReport()
+    pdf.alias_nb_pages()
+
+    # Try to register a Unicode TrueType font (DejaVuSans)
+    unicode_font_registered = False
+    # Common TTF font paths across Linux, macOS and Windows
+    font_paths = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/Library/Fonts/DejaVuSans.ttf",
+        "/Library/Fonts/LiberationSans-Regular.ttf",
+        "C:\\Windows\\Fonts\\DejaVuSans.ttf",
+        "C:\\Windows\\Fonts\\LiberationSans-Regular.ttf",
+        "C:\\Windows\\Fonts\\Arial.ttf",
+    ]
+    for fp in font_paths:
+        try:
+            if os.path.exists(fp):
+                pdf.add_page()  # add page after alias to avoid font issues
+                pdf.add_font('DejaVu', '', fp, uni=True)
+                unicode_font_registered = True
+                break
+        except Exception:
+            unicode_font_registered = False
+
+    if not unicode_font_registered:
+        pdf.add_page()
+
+    # Helper to sanitize text based on font availability
+    def _safe_text(txt: str) -> str:
+        if txt is None:
+            return ""
+        s = str(txt)
+        if unicode_font_registered:
+            return s
+        try:
+            return s.encode('latin-1', 'replace').decode('latin-1')
+        except Exception:
+            return s
+            
+    # Title
+    if unicode_font_registered:
+        pdf.set_font('DejaVu', '', 16)
+    else:
+        pdf.set_font('Helvetica', 'B', 16)
+        
+    try:
+        if 'XPos' in globals() and XPos:
+            pdf.cell(0, 10, 'Testset Performance Report', new_x=XPos.LMARGIN, new_y=YPos.NEXT, align='C')
+        else:
+            pdf.cell(0, 10, 'Testset Performance Report', 0, 1, 'C')
+    except:
+         pdf.cell(0, 10, 'Testset Performance Report', 0, 1, 'C')
+    pdf.ln(10)
+
+    # Charts
+    for title, path in chart_paths.items():
+        if pdf.get_y() > 200:
+            pdf.add_page()
+            
+        if unicode_font_registered:
+            pdf.set_font('DejaVu', '', 14)
+        else:
+            pdf.set_font("Helvetica", 'B', 14)
+            
+        try:
+            if 'XPos' in globals() and XPos:
+                 pdf.cell(0, 10, _safe_text(title), new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+            else:
+                 pdf.cell(0, 10, _safe_text(title), 0, 1)
+        except:
+             pdf.cell(0, 10, _safe_text(title), 0, 1)
+
+        try:
+            pdf.image(path, x=10, w=190)
+        except Exception as e:
+            if unicode_font_registered:
+                pdf.set_font('DejaVu', '', 10)
+            else:
+                pdf.set_font("Helvetica", 'I', 10)
+            pdf.cell(0, 10, _safe_text(f"Error adding chart: {str(e)}"), 0, 1)
+        pdf.ln(10)
+        
+    pdf_output = pdf.output(dest='S')
+    
+    if isinstance(pdf_output, (bytes, bytearray)):
+        return bytes(pdf_output)
     try:
         return pdf_output.encode('latin-1')
     except Exception:
@@ -1714,49 +2004,125 @@ if st.session_state.results:
         import tempfile
         chart_paths = {}
         
-        # Speed Chart
-        if len(st.session_state.performance_stats) > 0:
-            stats_df = create_stats_dataframe(st.session_state.performance_stats)
-            if not stats_df.empty:
-                try:
-                    speed_fig = create_speed_chart(stats_df)
-                    if speed_fig:
-                        with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp:
-                            speed_fig.savefig(tmp.name, format='png', dpi=150, bbox_inches='tight')
-                            chart_paths['Speed Comparison'] = tmp.name
-                        plt.close(speed_fig)
+        testset_results = st.session_state.get('testset_results', [])
+        is_testset_mode = len(testset_results) > 0
+        
+        if is_testset_mode:
+            # Testset Logic
+            
+            # Aggregate stats
+            model_stats = {} # model -> {total_time: [], ttft: [], tps: [], accurate: []}
+            for item in testset_results:
+                perf = item.get('performance_stats', {})
+                validation = item.get('validation', {})
+                
+                for model_name, stats in perf.items():
+                    if model_name not in model_stats:
+                        model_stats[model_name] = {'total_time': [], 'ttft': [], 'tps': [], 'accurate': []}
+                    
+                    if stats:
+                        m_stats = model_stats[model_name]
+                        if 'total_time' in stats: m_stats['total_time'].append(stats['total_time'])
+                        if 'time_to_first_token' in stats: m_stats['ttft'].append(stats['time_to_first_token'])
+                        if 'tokens_per_second' in stats: m_stats['tps'].append(stats['tokens_per_second'])
                         
-                    time_fig = create_time_chart(stats_df)
+                    if model_name in validation:
+                        model_stats[model_name]['accurate'].append(1 if validation[model_name] else 0)
+
+            agg_data = []
+            for m, data in model_stats.items():
+                row = {'Model': m}
+                if data['total_time']: row['Total Time (seconds)'] = sum(data['total_time']) / len(data['total_time'])
+                if data['ttft']: row['Time to First Token (seconds)'] = sum(data['ttft']) / len(data['ttft'])
+                if data['tps']: row['Tokens per Second'] = sum(data['tps']) / len(data['tps'])
+                if data['accurate']: row['Accuracy'] = sum(data['accurate']) / len(data['accurate'])
+                agg_data.append(row)
+            
+            agg_df = pd.DataFrame(agg_data)
+            
+            if not agg_df.empty:
+                # 1. Total time & Time to first token (stacked bar chart)
+                try:
+                    time_fig = create_stacked_time_chart(agg_df)
                     if time_fig:
                         with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp:
                             time_fig.savefig(tmp.name, format='png', dpi=150, bbox_inches='tight')
-                            chart_paths['Time Comparison'] = tmp.name
+                            chart_paths['Average Latency Distribution (Stacked)'] = tmp.name
                         plt.close(time_fig)
                 except Exception as e:
-                    st.warning(f"Could not generate performance charts for PDF: {e}")
+                    st.warning(f"Could not generate stacked time chart: {e}")
+                
+                # 2. Tokens per second
+                if 'Tokens per Second' in agg_df.columns:
+                    try:
+                        # Reusing create_speed_chart but with aggregated DF. It expects 'Model' and 'Tokens per Second' cols which we have.
+                        speed_fig = create_speed_chart(agg_df)
+                        if speed_fig:
+                            with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp:
+                                speed_fig.savefig(tmp.name, format='png', dpi=150, bbox_inches='tight')
+                                chart_paths['Average Speed (Tokens/s)'] = tmp.name
+                            plt.close(speed_fig)
+                    except Exception as e:
+                        st.warning(f"Could not generate speed chart: {e}")
+                
+                # 3. Accuracy
+                if 'Accuracy' in agg_df.columns:
+                    try:
+                        acc_fig = create_testset_accuracy_chart(agg_df)
+                        if acc_fig:
+                            with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp:
+                                acc_fig.savefig(tmp.name, format='png', dpi=150, bbox_inches='tight')
+                                chart_paths['Accuracy'] = tmp.name
+                            plt.close(acc_fig)
+                    except Exception as e:
+                         st.warning(f"Could not generate accuracy chart: {e}")
+            
+            pdf_bytes = generate_testset_pdf_report(chart_paths)
 
-        # Accuracy Chart
-        if current_ratings:
-            try:
-                acc_fig = create_accuracy_chart(current_ratings)
-                if acc_fig:
-                    with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp:
-                        acc_fig.savefig(tmp.name, format='png', dpi=150, bbox_inches='tight')
-                        chart_paths['Accuracy Ratings'] = tmp.name
-                    plt.close(acc_fig)
-            except Exception as e:
-                st.warning(f"Could not generate accuracy chart for PDF: {e}")
+        else:
+            # Speed Chart
+            if len(st.session_state.performance_stats) > 0:
+                stats_df = create_stats_dataframe(st.session_state.performance_stats)
+                if not stats_df.empty:
+                    try:
+                        speed_fig = create_speed_chart(stats_df)
+                        if speed_fig:
+                            with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp:
+                                speed_fig.savefig(tmp.name, format='png', dpi=150, bbox_inches='tight')
+                                chart_paths['Speed Comparison'] = tmp.name
+                            plt.close(speed_fig)
+                            
+                        time_fig = create_time_chart(stats_df)
+                        if time_fig:
+                            with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp:
+                                time_fig.savefig(tmp.name, format='png', dpi=150, bbox_inches='tight')
+                                chart_paths['Time Comparison'] = tmp.name
+                            plt.close(time_fig)
+                    except Exception as e:
+                        st.warning(f"Could not generate performance charts for PDF: {e}")
 
-        pdf_bytes = generate_pdf_report(
-            user_prompt,
-            system_prompt,
-            st.session_state.results,
-            st.session_state.performance_stats,
-            current_ratings,
-            st.session_state.evaluation_result,
-            user_prompt_vars,
-            chart_paths
-        )
+            # Accuracy Chart
+            if current_ratings:
+                try:
+                    acc_fig = create_accuracy_chart(current_ratings)
+                    if acc_fig:
+                        with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp:
+                            acc_fig.savefig(tmp.name, format='png', dpi=150, bbox_inches='tight')
+                            chart_paths['Accuracy Ratings'] = tmp.name
+                        plt.close(acc_fig)
+                except Exception as e:
+                    st.warning(f"Could not generate accuracy chart for PDF: {e}")
+
+            pdf_bytes = generate_pdf_report(
+                user_prompt,
+                system_prompt,
+                st.session_state.results,
+                st.session_state.performance_stats,
+                current_ratings,
+                st.session_state.evaluation_result,
+                user_prompt_vars,
+                chart_paths
+            )
         
         # Cleanup temp files
         for path in chart_paths.values():
