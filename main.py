@@ -457,11 +457,123 @@ def extract_streaming_final_stats(chunk_data: dict, stats: PerformanceStats) -> 
     return stats
 
 
+def evaluate_response_accuracy(judge_model: str, user_prompt: str, model_response: str, expected_responses: Optional[str] = None) -> bool:
+    """
+    Uses a judge model to determine if the response is accurate by comparing
+    the model's response against the expected responses.
+    
+    Args:
+        judge_model: The model to use as judge
+        user_prompt: The original prompt (for context only)
+        model_response: The LLM's actual response to evaluate
+        expected_responses: Pipe-separated expected responses (e.g., "resp1 | resp2 | resp3")
+    
+    Returns True if accurate, False otherwise.
+    """
+    if not expected_responses:
+        return False
+    
+    # Use Ollama structured output for reliable parsing
+    try:
+        # Build a balanced judge prompt focused on semantic equivalence
+        judge_prompt = f"""You are an accuracy judge. Determine if MODEL_RESPONSE is semantically equivalent to ANY of the EXPECTED_RESPONSES.
+
+=== EXPECTED_RESPONSES ===
+{expected_responses}
+
+=== MODEL_RESPONSE ===
+{model_response}
+
+=== JUDGMENT CRITERIA ===
+
+Mark as "accurate" if:
+1. The MODEL_RESPONSE conveys the SAME CORE MEANING as any expected response
+2. The MODEL_RESPONSE asks the same question or makes the same statement, even if worded differently
+3. The MODEL_RESPONSE is a more general or more specific version of an expected response, as long as the core topic is the same
+4. Both MODEL_RESPONSE and an expected response use similar reference styles (e.g., both use "it" or both use explicit terms)
+
+Mark as "not_accurate" if:
+1. The MODEL_RESPONSE uses VAGUE REFERENCES (like "it", "they", "those", "this") when the expected responses use EXPLICIT, SPECIFIC terms - this indicates the model failed to resolve the reference
+2. The MODEL_RESPONSE asks about or states something fundamentally DIFFERENT from all expected responses
+3. The MODEL_RESPONSE is about a completely different topic or entity
+
+=== KEY DISTINCTION ===
+The critical test for vague references: Look at whether the EXPECTED_RESPONSES themselves use vague terms.
+- If expected responses say "How can we source it?" → a model response with "it" is ACCURATE
+- If expected responses say "How can we source the main material?" → a model response with "it" is NOT ACCURATE
+
+=== EXAMPLES ===
+
+# I've removved them for my use case. Feel free to add your own.
+
+=== YOUR TASK ===
+Determine if MODEL_RESPONSE is semantically equivalent to ANY expected response, considering the rules above."""
+
+        # Use Ollama structured output to get consistent results
+        structured_response = ollama.generate(
+            model=judge_model,
+            prompt=judge_prompt,
+            format={
+                "type": "object",
+                "properties": {
+                    "judgment": {
+                        "type": "string",
+                        "enum": ["accurate", "not_accurate"],
+                        "description": "Whether the model response is semantically equivalent to any expected response"
+                    }
+                },
+                "required": ["judgment"]
+            },
+            options={'temperature': 0.0}  # Zero temperature for deterministic judgment
+        )
+        
+        # Parse the structured response
+        result = json.loads(structured_response['response'])
+        judgment = result.get("judgment", "").lower()
+        
+        # Log the judgment for debugging
+        if 'debug_info' in st.session_state:
+            st.session_state.debug_info.append(
+                f"Judge ({judge_model}): {judgment} | Response: '{model_response[:80]}...'"
+            )
+        
+        return judgment == "accurate"
+        
+    except Exception as e:
+        # Log error in debug info
+        if 'debug_info' in st.session_state:
+            st.session_state.debug_info.append(f"Accuracy judge error: {str(e)}")
+        
+        # Fallback: try non-structured approach if structured output fails
+        try:
+            fallback_prompt = f"""Compare MODEL_RESPONSE against EXPECTED_RESPONSES for semantic equivalence.
+
+EXPECTED_RESPONSES: {expected_responses}
+
+MODEL_RESPONSE: {model_response}
+
+RULE: Mark accurate if the core meaning is the same. Only mark not_accurate if the model uses vague references (it/they/those) when expected responses use explicit terms, OR if the topic is completely different.
+
+Answer ONLY with "accurate" or "not_accurate":"""
+            
+            response, _ = query_model(judge_model, fallback_prompt, None, temperature=0.0)
+            response_lower = response.lower().strip()
+            
+            if "not_accurate" in response_lower or "not accurate" in response_lower:
+                return False
+            if "accurate" in response_lower:
+                return True
+            return False
+        except:
+            return False
+
+
+
 def parse_testset_file(uploaded_file, input_vars: List[str]) -> List[Dict[str, str]]:
     """Parse a testset file into a list of variable dicts.
-    Accepts CSV or simple comma-separated lines. If the file has a header matching
-    the input variable names, that will be used. Otherwise values are mapped by
-    position to `input_vars`.
+    Accepts CSV, pipe-delimited (|||), or simple comma-separated lines. 
+    If the file has a header matching the input variable names, that will be used. 
+    Otherwise values are mapped by position to `input_vars`.
     """
     if not uploaded_file:
         return []
@@ -476,9 +588,26 @@ def parse_testset_file(uploaded_file, input_vars: List[str]) -> List[Dict[str, s
             content = str(uploaded_file.getvalue())
 
     rows = []
-    reader = csv.reader([line for line in content.splitlines() if line.strip()])
-    # Peek first row to see if header matches input_vars
-    all_lines = list(reader)
+    
+    # Detect delimiter: check if ||| is used (preferred for avoiding comma conflicts)
+    lines = [line for line in content.splitlines() if line.strip()]
+    if not lines:
+        return []
+    
+    # Check first non-empty line for delimiter type
+    use_pipe_delimiter = "|||" in lines[0]
+    
+    if use_pipe_delimiter:
+        # Parse using ||| delimiter
+        all_lines = []
+        for line in lines:
+            parts = [p.strip() for p in line.split("|||")]
+            all_lines.append(parts)
+    else:
+        # Fall back to CSV parsing for backward compatibility
+        reader = csv.reader(lines)
+        all_lines = list(reader)
+    
     if not all_lines:
         return []
 
@@ -564,7 +693,11 @@ def aggregate_testset_results_to_dataframe(testset_results: List[Dict]) -> pd.Da
 
             if expected_responses:
                 rec['expected_response'] = " | ".join(expected_responses)
-                rec['is_accurate'] = validation.get(model, False)
+
+            if validation:
+                is_acc = validation.get(model, False)
+                rec['is_accurate'] = is_acc
+                rec['accuracy_label'] = "Accurate" if is_acc else "Not Accurate"
 
             if stats:
                 rec.update({
@@ -1639,7 +1772,7 @@ progress_bar = st.empty()
 streaming_section = st.empty()
 
 # Define the model processing function
-def process_models(selected_models, system_prompt_text=None, user_prompt_text=None, iteration_info=None):
+def process_models(selected_models, system_prompt_text=None, user_prompt_text=None, iteration_info=None, render_debug=True):
     """Process all selected models and collect responses with performance stats."""
     # Default to globol user_prompt if not provided
     if user_prompt_text is None:
@@ -1713,9 +1846,10 @@ def process_models(selected_models, system_prompt_text=None, user_prompt_text=No
     if streaming_display:
         streaming_display.empty()
     
-    # Show debug information in an expander
-    with st.expander("Debug Information"):
-        st.code("\n".join(st.session_state.debug_info))
+    # Show debug information in an expander if requested
+    if render_debug:
+        with st.expander("Debug Information"):
+            st.code("\n".join(st.session_state.debug_info))
     
     # Clear stop button when done
     stop_button_container.empty()
@@ -1790,6 +1924,7 @@ if compare_button:
 
         if testset_rows:
             st.session_state.testset_results = []
+            consolidated_debug_info = []
             st.info(f"Running {len(testset_rows)} prompt iterations from testset")
             # Iterate through each variable set
             for idx, vars_map in enumerate(testset_rows, start=1):
@@ -1816,38 +1951,57 @@ if compare_button:
 
                 if not enable_streaming:
                     with st.spinner(f"{iteration_info}: Generating responses..."):
-                        process_models(selected_models, system_prompt, iter_prompt, iteration_info=iteration_info)
+                        process_models(selected_models, system_prompt, iter_prompt, iteration_info=iteration_info, render_debug=False)
                 else:
-                    process_models(selected_models, system_prompt, iter_prompt, iteration_info=iteration_info)
+                    process_models(selected_models, system_prompt, iter_prompt, iteration_info=iteration_info, render_debug=False)
+                
+                # Consolidate debug info
+                if 'debug_info' in st.session_state:
+                     consolidated_debug_info.extend(st.session_state.debug_info)
+                     if idx < len(testset_rows):
+                        consolidated_debug_info.append("-" * 40)
 
                 # Capture results for this iteration
                 iter_results = copy.deepcopy(st.session_state.results)
                 iter_stats = {m: s.to_dict() for m, s in st.session_state.performance_stats.items()}
                 
-                # Check accuracy against expected responses
+                # Check accuracy using Judge LLM
                 iter_validation = {}
-                if '_expected_responses' in vars_map:
-                    expected_responses = vars_map['_expected_responses']
-                    # Ensure it's a list
-                    if isinstance(expected_responses, str):
-                        expected_responses = [expected_responses]
-                        
-                    for m, response in iter_results.items():
-                        # Clean response
-                        # We use a normalized exact match to avoid false positives (e.g. "test123, test 123" matching "test123")
-                        # and strictly check for the answer content.
-                        def normalize_text(text):
-                            if not text: return ""
-                            # Remove non-alphanumeric characters (keep only \w and \s) to ignore punctuation
-                            # This allows "Answer." to match "Answer"
-                            text = re.sub(r'[^\w\s]', '', text).lower()
-                            return re.sub(r'\s+', ' ', text).strip()
+                # We need an evaluation model to be selected
+                evaluation_model_name = st.session_state.get("evaluation_model_value", "") or evaluation_model
+                
+                if evaluation_model_name:
+                    # Get expected response if available
+                    expected_resp_str = None
+                    if '_expected_responses' in vars_map:
+                         exps = vars_map['_expected_responses']
+                         if isinstance(exps, list):
+                             expected_resp_str = " | ".join(exps)
+                         else:
+                             expected_resp_str = str(exps)
+                    
+                    # Log expected responses for debugging
+                    if expected_resp_str and 'debug_info' in st.session_state:
+                        st.session_state.debug_info.append(f"Expected responses: {expected_resp_str[:100]}...")
 
-                        r_text_norm = normalize_text(response)
-                        
-                        # Check strict equality against any valid expected response
-                        is_valid = any(normalize_text(exp) == r_text_norm for exp in expected_responses if exp and exp.strip())
-                        iter_validation[m] = is_valid
+                    if expected_resp_str:
+                        if not enable_streaming:
+                            for m, response in iter_results.items():
+                                with st.spinner(f"{iteration_info}: Judging accuracy of {m} with {evaluation_model_name}..."):
+                                    is_accurate = evaluate_response_accuracy(evaluation_model_name, iter_prompt, response, expected_resp_str)
+                                    iter_validation[m] = is_accurate
+                        else:
+                            # If streaming, we might want to show some progress or just do it
+                            for m, response in iter_results.items():
+                                progress_container.markdown(f"**{iteration_info}** | Judging accuracy of {m} with {evaluation_model_name}...")
+                                is_accurate = evaluate_response_accuracy(evaluation_model_name, iter_prompt, response, expected_resp_str)
+                                iter_validation[m] = is_accurate
+                    else:
+                        if idx == 1:  # Warn once
+                            st.warning("No expected responses found in testset. Accuracy checking skipped.")
+                else:
+                    if idx == 1: # Warn once
+                        st.warning("No evaluation model selected. Accuracy checking skipped.")
 
                 st.session_state.testset_results.append({
                     'vars': vars_map,
@@ -1857,6 +2011,21 @@ if compare_button:
                 })
 
             st.success("Testset processing complete")
+
+            # --- Download Testset Results ---
+            if st.session_state.testset_results:
+                csv_df = aggregate_testset_results_to_dataframe(st.session_state.testset_results)
+                if not csv_df.empty:
+                    st.download_button(
+                        label="Download Results (CSV)",
+                        data=csv_df.to_csv(index=False),
+                        file_name="testset_results.csv",
+                        mime="text/csv"
+                    )
+            
+            # Show consolidated debug info
+            with st.expander("Debug Information (All Runs)"):
+                st.code("\n".join(consolidated_debug_info))
         else:
             # Process models with or without spinner based on streaming setting
             if not enable_streaming:
