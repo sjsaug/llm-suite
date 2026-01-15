@@ -67,6 +67,10 @@ if 'remove_status' not in st.session_state:
 if 'testset_batch_reports' not in st.session_state:
     st.session_state.testset_batch_reports = []
 
+# Batch debug logs for testset runs
+if 'testset_batch_debug_logs' not in st.session_state:
+    st.session_state.testset_batch_debug_logs = []
+
 # Persist uploaded testsets
 if 'prompt_testsets' not in st.session_state:
     st.session_state.prompt_testsets = []
@@ -294,9 +298,12 @@ def remove_model(model_name):
 
 # non-streaming inference function
 def query_model(model_name: str, prompt: str, system_prompt: Optional[str] = None, 
-                temperature: float = 0.7) -> tuple[str, PerformanceStats]:
+                temperature: float = 0.7, keep_alive: str = "10m") -> tuple[str, PerformanceStats]:
     """
     Query a model without streaming and return response with performance stats.
+    
+    Args:
+        keep_alive: How long to keep model in memory (e.g., "10m", "1h", "-1" for indefinite)
     Returns: (response_text, PerformanceStats)
     """
     stats = PerformanceStats(model_name=model_name)
@@ -308,7 +315,8 @@ def query_model(model_name: str, prompt: str, system_prompt: Optional[str] = Non
             "model": model_name,
             "prompt": prompt,
             "stream": False,
-            "options": {"temperature": temperature}
+            "options": {"temperature": temperature},
+            "keep_alive": keep_alive  # Prevent model unloading during batch operations
         }
         
         # add system prompt if provided
@@ -358,9 +366,12 @@ def extract_ollama_stats(response, stats: PerformanceStats) -> PerformanceStats:
 # streaming inference function
 def query_model_streaming(model_name: str, prompt: str, system_prompt: Optional[str] = None, 
                          temperature: float = 0.7, progress_container=None, 
-                         streaming_display=None) -> tuple[str, PerformanceStats]:
+                         streaming_display=None, keep_alive: str = "10m") -> tuple[str, PerformanceStats]:
     """
     Query a model with streaming and return response with performance stats.
+    
+    Args:
+        keep_alive: How long to keep model in memory (e.g., "10m", "1h", "-1" for indefinite)
     Returns: (response_text, PerformanceStats)
     """
     stats = PerformanceStats(model_name=model_name)
@@ -374,7 +385,8 @@ def query_model_streaming(model_name: str, prompt: str, system_prompt: Optional[
             "model": model_name,
             "prompt": prompt,
             "stream": True,
-            "options": {"temperature": temperature}
+            "options": {"temperature": temperature},
+            "keep_alive": keep_alive  # Prevent model unloading during batch operations
         }
         
         # add system prompt if provided
@@ -533,7 +545,8 @@ Determine if MODEL_RESPONSE is semantically equivalent to ANY expected response,
                 },
                 "required": ["judgment"]
             },
-            options={'temperature': 0.0}  # Zero temperature for deterministic judgment
+            options={'temperature': 0.0},  # Zero temperature for deterministic judgment
+            keep_alive="10m"  # Keep judge model loaded during batch evaluation
         )
         
         # Parse the structured response
@@ -2072,7 +2085,7 @@ if compare_button:
 
         if testsets:
             st.session_state.testset_batch_reports = []
-            batch_debug_logs = []
+            st.session_state.testset_batch_debug_logs = []
             
             # Calculate total operations across ALL test sets for batch progress tracking
             total_batch_ops = 0
@@ -2296,45 +2309,12 @@ if compare_button:
                     'pdf': assets.get('pdf'),
                     'agg_df': assets.get('agg_df')
                 })
-                batch_debug_logs.append({'name': ts_name, 'logs': consolidated_debug_info})
+                st.session_state.testset_batch_debug_logs.append({'name': ts_name, 'logs': consolidated_debug_info})
                 st.success(f"Completed {ts_name}")
 
             # Clear batch progress indicators
             batch_progress_bar.empty()
             batch_progress_container.empty()
-
-            if st.session_state.testset_batch_reports:
-                st.success(f"Testset processing complete for {len(st.session_state.testset_batch_reports)} set(s)")
-                st.markdown("### Testset Reports")
-                for idx, report in enumerate(st.session_state.testset_batch_reports, start=1):
-                    safe_name = safe_filename(report.get('name')) or f"testset_{idx}"
-                    st.markdown(f"**{report.get('name', f'Testset {idx}')}** ({report.get('rows', 0)} rows)")
-                    if report.get('csv'):
-                        st.download_button(
-                            label="Download Results (CSV)",
-                            data=report['csv'],
-                            file_name=f"{safe_name}_results.csv",
-                            mime="text/csv",
-                            key=f"csv_{safe_name}_{idx}",
-                            use_container_width=True
-                        )
-                    if report.get('pdf'):
-                        pdf_bytes = report['pdf']
-                        pdf_data = pdf_bytes.encode('latin-1') if isinstance(pdf_bytes, str) else bytes(pdf_bytes)
-                        st.download_button(
-                            label="Download Testset PDF",
-                            data=pdf_data,
-                            file_name=f"{safe_name}_report.pdf",
-                            mime="application/pdf",
-                            key=f"pdf_{safe_name}_{idx}",
-                            use_container_width=True
-                        )
-                    st.divider()
-
-            if batch_debug_logs:
-                for entry in batch_debug_logs:
-                    with st.expander(f"Debug Information ({entry['name']})"):
-                        st.code("\n".join(entry['logs']))
         else:
             # Process models with or without spinner based on streaming setting
             if not enable_streaming:
@@ -2342,6 +2322,53 @@ if compare_button:
                     process_models(selected_models, system_prompt, final_user_prompt)
             else:
                 process_models(selected_models, system_prompt, final_user_prompt)
+
+# Display testset batch reports (outside compare_button block so they persist across reruns)
+if st.session_state.testset_batch_reports:
+    st.success(f"Testset processing complete for {len(st.session_state.testset_batch_reports)} set(s)")
+    st.markdown("### Testset Reports")
+    
+    # Add a button to clear all reports
+    if st.button("Clear All Reports", key="clear_batch_reports"):
+        st.session_state.testset_batch_reports = []
+        st.session_state.testset_batch_debug_logs = []
+        st.session_state.testset_results = []
+        st.rerun()
+    
+    for idx, report in enumerate(st.session_state.testset_batch_reports, start=1):
+        safe_name = safe_filename(report.get('name')) or f"testset_{idx}"
+        st.markdown(f"**{report.get('name', f'Testset {idx}')}** ({report.get('rows', 0)} rows)")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            if report.get('csv'):
+                st.download_button(
+                    label="Download Results (CSV)",
+                    data=report['csv'],
+                    file_name=f"{safe_name}_results.csv",
+                    mime="text/csv",
+                    key=f"csv_{safe_name}_{idx}",
+                    use_container_width=True
+                )
+        with col2:
+            if report.get('pdf'):
+                pdf_bytes = report['pdf']
+                pdf_data = pdf_bytes.encode('latin-1') if isinstance(pdf_bytes, str) else bytes(pdf_bytes)
+                st.download_button(
+                    label="Download Testset PDF",
+                    data=pdf_data,
+                    file_name=f"{safe_name}_report.pdf",
+                    mime="application/pdf",
+                    key=f"pdf_{safe_name}_{idx}",
+                    use_container_width=True
+                )
+        st.divider()
+
+    # Show debug logs in expanders
+    if st.session_state.testset_batch_debug_logs:
+        for entry in st.session_state.testset_batch_debug_logs:
+            with st.expander(f"Debug Information ({entry['name']})"):
+                st.code("\n".join(entry['logs']))
 
 # Display results
 if st.session_state.results:
