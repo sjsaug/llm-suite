@@ -12,6 +12,7 @@ import os
 import time
 import csv
 import copy
+import tempfile
 from fpdf import FPDF
 try:
     from fpdf.enums import XPos, YPos
@@ -61,6 +62,14 @@ if 'download_status' not in st.session_state:
 
 if 'remove_status' not in st.session_state:
     st.session_state.remove_status = None
+
+# Batch testset artifacts
+if 'testset_batch_reports' not in st.session_state:
+    st.session_state.testset_batch_reports = []
+
+# Persist uploaded testsets
+if 'prompt_testsets' not in st.session_state:
+    st.session_state.prompt_testsets = []
 
 # --- Performance Stats Data Class ---
 @dataclass
@@ -1359,6 +1368,129 @@ def generate_testset_pdf_report(chart_paths, rankings=None):
     except Exception:
         return pdf_output.encode('latin-1', 'replace')
 
+
+def safe_filename(name: str) -> str:
+    """Generate a filesystem-safe filename from arbitrary text."""
+    if not name:
+        return "testset"
+    sanitized = re.sub(r'[^A-Za-z0-9_.-]+', '_', str(name))
+    sanitized = sanitized.strip('_')
+    return sanitized or "testset"
+
+
+def build_testset_report_assets(testset_results: List[Dict]) -> Dict[str, Any]:
+    """Create aggregated CSV/PDF artifacts from testset run results."""
+    if not testset_results:
+        return {"pdf": None, "csv_df": pd.DataFrame(), "agg_df": pd.DataFrame()}
+
+    # Aggregate per-model stats across all iterations
+    model_stats: Dict[str, Dict[str, List[float]]] = {}
+    for item in testset_results:
+        perf = item.get('performance_stats', {}) or {}
+        validation = item.get('validation', {}) or {}
+
+        for model_name, stats in perf.items():
+            if model_name not in model_stats:
+                model_stats[model_name] = {'total_time': [], 'ttft': [], 'tps': [], 'accurate': []}
+
+            if stats:
+                model_stats[model_name]['total_time'].append(stats.get('total_time', 0))
+                model_stats[model_name]['ttft'].append(stats.get('time_to_first_token', 0))
+                model_stats[model_name]['tps'].append(stats.get('tokens_per_second', 0))
+
+            if model_name in validation:
+                model_stats[model_name]['accurate'].append(1 if validation[model_name] else 0)
+
+    agg_data = []
+    for model_name, data in model_stats.items():
+        row: Dict[str, Any] = {'Model': model_name}
+        if data['total_time']:
+            row['Total Time (seconds)'] = sum(data['total_time']) / len(data['total_time'])
+        if data['ttft']:
+            row['Time to First Token (seconds)'] = sum(data['ttft']) / len(data['ttft'])
+        if data['tps']:
+            row['Tokens per Second'] = sum(data['tps']) / len(data['tps'])
+        if data['accurate']:
+            row['Accuracy'] = sum(data['accurate']) / len(data['accurate'])
+            row['Accuracy_Count'] = f"({sum(data['accurate'])}/{len(data['accurate'])})"
+        agg_data.append(row)
+
+    agg_df = pd.DataFrame(agg_data)
+    chart_paths: Dict[str, str] = {}
+    rankings: Dict[str, List[Dict[str, str]]] = {}
+
+    if not agg_df.empty:
+        # 1) Latency (stacked) chart
+        try:
+            time_fig = create_stacked_time_chart(agg_df)
+            if time_fig:
+                title = 'Average Latency Distribution (Stacked)'
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp:
+                    time_fig.savefig(tmp.name, format='png', dpi=150, bbox_inches='tight')
+                    chart_paths[title] = tmp.name
+                plt.close(time_fig)
+
+                if 'Total Time (seconds)' in agg_df.columns:
+                    sorted_df = agg_df.sort_values(by='Total Time (seconds)', ascending=True)
+                    rankings[title] = []
+                    for _, row in sorted_df.iterrows():
+                        stats_str = f"Total: {row['Total Time (seconds)']:.2f}s"
+                        if 'Time to First Token (seconds)' in row:
+                            stats_str += f" | TTFT: {row['Time to First Token (seconds)']:.3f}s"
+                        rankings[title].append({'model': row['Model'], 'stats': stats_str})
+        except Exception as e:
+            st.warning(f"Could not generate stacked time chart: {e}")
+
+        # 2) Speed chart
+        if 'Tokens per Second' in agg_df.columns:
+            try:
+                speed_fig = create_speed_chart(agg_df)
+                if speed_fig:
+                    title = 'Average Speed (Tokens/s)'
+                    with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp:
+                        speed_fig.savefig(tmp.name, format='png', dpi=150, bbox_inches='tight')
+                        chart_paths[title] = tmp.name
+                    plt.close(speed_fig)
+
+                    sorted_df = agg_df.sort_values(by='Tokens per Second', ascending=False)
+                    rankings[title] = []
+                    for _, row in sorted_df.iterrows():
+                        rankings[title].append({'model': row['Model'], 'stats': f"{row['Tokens per Second']:.1f} tok/s"})
+            except Exception as e:
+                st.warning(f"Could not generate speed chart: {e}")
+
+        # 3) Accuracy chart
+        if 'Accuracy' in agg_df.columns:
+            try:
+                acc_fig = create_testset_accuracy_chart(agg_df)
+                if acc_fig:
+                    title = 'Accuracy'
+                    with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp:
+                        acc_fig.savefig(tmp.name, format='png', dpi=150, bbox_inches='tight')
+                        chart_paths[title] = tmp.name
+                    plt.close(acc_fig)
+
+                    sorted_df = agg_df.sort_values(by='Accuracy', ascending=False)
+                    rankings[title] = []
+                    for _, row in sorted_df.iterrows():
+                        acc_pct = row['Accuracy'] * 100
+                        count_str = row.get('Accuracy_Count', '')
+                        rankings[title].append({'model': row['Model'], 'stats': f"{acc_pct:.1f}% {count_str}"})
+            except Exception as e:
+                st.warning(f"Could not generate accuracy chart: {e}")
+
+    pdf_bytes = generate_testset_pdf_report(chart_paths, rankings)
+
+    # Cleanup temp files created for charts
+    for path in chart_paths.values():
+        try:
+            os.remove(path)
+        except Exception:
+            pass
+
+    csv_df = aggregate_testset_results_to_dataframe(testset_results)
+    return {"pdf": pdf_bytes, "csv_df": csv_df, "agg_df": agg_df}
+
 def get_installed_model_names():
     _, models_info = get_available_models()
     return set(model["name"] for model in models_info)
@@ -1736,21 +1868,33 @@ if user_prompt:
                         key=key
                     )
             # Testset file upload for iterative runs
-            st.markdown("#### Prompt Variable Testset (optional)")
-            uploaded_testset = st.file_uploader("Upload testset file (CSV or lines of comma-separated values)", type=['csv','txt'], key='testset_uploader')
-            testset_rows = []
-            if uploaded_testset:
-                try:
-                    testset_rows = parse_testset_file(uploaded_testset, input_vars)
-                    st.info(f"Parsed {len(testset_rows)} rows from testset file")
-                    if len(testset_rows) > 0:
-                        # show first 3 rows as preview
-                        preview_df = pd.DataFrame(testset_rows[:5])
-                        st.dataframe(preview_df, use_container_width=True)
-                except Exception as e:
-                    st.error(f"Error parsing testset file: {e}")
-            # Store parsed rows in session for later use
-            st.session_state['prompt_testset_rows'] = testset_rows
+            st.markdown("#### Prompt Variable Testsets (optional)")
+            uploaded_testsets = st.file_uploader(
+                "Upload one or more testset files (CSV or lines of comma-separated values)",
+                type=['csv','txt'],
+                key='testset_uploader',
+                accept_multiple_files=True
+            )
+
+            parsed_testsets = []
+            if uploaded_testsets:
+                for uploaded_file in uploaded_testsets:
+                    try:
+                        rows = parse_testset_file(uploaded_file, input_vars)
+                        parsed_testsets.append({"name": uploaded_file.name, "rows": rows})
+                        st.info(f"{uploaded_file.name}: parsed {len(rows)} rows from testset")
+                        if len(rows) > 0:
+                            preview_df = pd.DataFrame(rows[:5])
+                            st.dataframe(preview_df, use_container_width=True)
+                    except Exception as e:
+                        st.error(f"Error parsing testset file {uploaded_file.name}: {e}")
+            else:
+                # Clear parsed testsets if none are uploaded to avoid stale state
+                st.session_state['prompt_testsets'] = []
+
+            # Store parsed rows/sets in session for later use
+            st.session_state['prompt_testsets'] = parsed_testsets
+            st.session_state['prompt_testset_rows'] = parsed_testsets[0]['rows'] if parsed_testsets else []
     except Exception as e:
         # Just catch it, we'll display error if they try to run
         template_error = f"Error parsing prompt template: {str(e)}"
@@ -1919,113 +2063,278 @@ if compare_button:
                 st.info("Stopping inference... please wait.")
                 st.rerun()
                 
-        # Determine if a testset was uploaded and parsed
-        testset_rows = st.session_state.get('prompt_testset_rows', []) or []
+        # Determine if one or more testsets were uploaded and parsed
+        testsets = st.session_state.get('prompt_testsets', []) or []
+        fallback_rows = st.session_state.get('prompt_testset_rows', []) or []
+        if not testsets and fallback_rows:
+            # Backward compatibility: treat single parsed rows as one testset
+            testsets = [{"name": "Testset 1", "rows": fallback_rows}]
 
-        if testset_rows:
-            st.session_state.testset_results = []
-            consolidated_debug_info = []
-            st.info(f"Running {len(testset_rows)} prompt iterations from testset")
-            # Iterate through each variable set
-            for idx, vars_map in enumerate(testset_rows, start=1):
+        if testsets:
+            st.session_state.testset_batch_reports = []
+            batch_debug_logs = []
+            
+            # Calculate total operations across ALL test sets for batch progress tracking
+            total_batch_ops = 0
+            for ts in testsets:
+                ts_rows = ts.get('rows', []) or []
+                num_entries = len(ts_rows)
+                # Operations per testset: (models * entries) for inference + (models * entries_with_expected) for judging
+                total_batch_ops += len(selected_models) * num_entries
+                # Estimate judging operations (assume all entries have expected responses for simplicity)
+                total_batch_ops += len(selected_models) * num_entries
+            
+            batch_progress_container = st.empty()
+            batch_progress_bar = st.empty()
+            completed_batch_ops = 0
+            
+            st.info(f"Running {len(testsets)} testset(s) sequentially")
+
+            for ts_idx, testset in enumerate(testsets, start=1):
                 if st.session_state.stop_inference:
                     st.session_state.debug_info.append("Testset run stopped by user")
                     break
 
-                # Build the prompt for this iteration
-                try:
-                    messages = prompt_template.format_messages(**vars_map)
-                    if messages and hasattr(messages[0], 'content'):
-                        iter_prompt = messages[0].content
-                    else:
-                        iter_prompt = prompt_template.format(**vars_map)
-                except Exception as e:
-                    st.error(f"Error formatting prompt for iteration {idx}: {e}")
+                ts_name = testset.get('name') or f"Testset {ts_idx}"
+                testset_rows = testset.get('rows', []) or []
+                if not testset_rows:
                     continue
 
-                # Clear previous results and run models for this single prompt
-                st.session_state.results = {}
-                st.session_state.performance_stats = {}
-
-                iteration_info = f"Test {idx}/{len(testset_rows)}"
-
-                if not enable_streaming:
-                    with st.spinner(f"{iteration_info}: Generating responses..."):
-                        process_models(selected_models, system_prompt, iter_prompt, iteration_info=iteration_info, render_debug=False)
-                else:
-                    process_models(selected_models, system_prompt, iter_prompt, iteration_info=iteration_info, render_debug=False)
+                st.session_state.testset_results = []
+                consolidated_debug_info = []
+                batch_progress_container.markdown(f"**Batch Progress:** Testset {ts_idx}/{len(testsets)} - {ts_name}")
+                st.info(f"{ts_name}: running {len(testset_rows)} entries across {len(selected_models)} models (optimized batch mode)")
                 
-                # Consolidate debug info
-                if 'debug_info' in st.session_state:
-                     consolidated_debug_info.extend(st.session_state.debug_info)
-                     if idx < len(testset_rows):
-                        consolidated_debug_info.append("-" * 40)
-
-                # Capture results for this iteration
-                iter_results = copy.deepcopy(st.session_state.results)
-                iter_stats = {m: s.to_dict() for m, s in st.session_state.performance_stats.items()}
+                # OPTIMIZED APPROACH: Run all test entries on each model before switching
+                # This minimizes model loading/unloading overhead
                 
-                # Check accuracy using Judge LLM
-                iter_validation = {}
-                # We need an evaluation model to be selected
-                evaluation_model_name = st.session_state.get("evaluation_model_value", "") or evaluation_model
-                
-                if evaluation_model_name:
-                    # Get expected response if available
-                    expected_resp_str = None
-                    if '_expected_responses' in vars_map:
-                         exps = vars_map['_expected_responses']
-                         if isinstance(exps, list):
-                             expected_resp_str = " | ".join(exps)
-                         else:
-                             expected_resp_str = str(exps)
-                    
-                    # Log expected responses for debugging
-                    if expected_resp_str and 'debug_info' in st.session_state:
-                        st.session_state.debug_info.append(f"Expected responses: {expected_resp_str[:100]}...")
-
-                    if expected_resp_str:
-                        if not enable_streaming:
-                            for m, response in iter_results.items():
-                                with st.spinner(f"{iteration_info}: Judging accuracy of {m} with {evaluation_model_name}..."):
-                                    is_accurate = evaluate_response_accuracy(evaluation_model_name, iter_prompt, response, expected_resp_str)
-                                    iter_validation[m] = is_accurate
+                # Step 1: Build all prompts upfront
+                all_prompts = []
+                for idx, vars_map in enumerate(testset_rows, start=1):
+                    try:
+                        messages = prompt_template.format_messages(**vars_map)
+                        if messages and hasattr(messages[0], 'content'):
+                            iter_prompt = messages[0].content
                         else:
-                            # If streaming, we might want to show some progress or just do it
-                            for m, response in iter_results.items():
-                                progress_container.markdown(f"**{iteration_info}** | Judging accuracy of {m} with {evaluation_model_name}...")
-                                is_accurate = evaluate_response_accuracy(evaluation_model_name, iter_prompt, response, expected_resp_str)
-                                iter_validation[m] = is_accurate
-                    else:
-                        if idx == 1:  # Warn once
-                            st.warning("No expected responses found in testset. Accuracy checking skipped.")
-                else:
-                    if idx == 1: # Warn once
-                        st.warning("No evaluation model selected. Accuracy checking skipped.")
-
-                st.session_state.testset_results.append({
-                    'vars': vars_map,
-                    'results': iter_results,
-                    'performance_stats': iter_stats,
-                    'validation': iter_validation
-                })
-
-            st.success("Testset processing complete")
-
-            # --- Download Testset Results ---
-            if st.session_state.testset_results:
-                csv_df = aggregate_testset_results_to_dataframe(st.session_state.testset_results)
-                if not csv_df.empty:
-                    st.download_button(
-                        label="Download Results (CSV)",
-                        data=csv_df.to_csv(index=False),
-                        file_name="testset_results.csv",
-                        mime="text/csv"
+                            iter_prompt = prompt_template.format(**vars_map)
+                        all_prompts.append({'idx': idx, 'prompt': iter_prompt, 'vars': vars_map})
+                    except Exception as e:
+                        st.error(f"Error formatting prompt for iteration {idx}: {e}")
+                        all_prompts.append({'idx': idx, 'prompt': None, 'vars': vars_map, 'error': str(e)})
+                
+                # Initialize results storage: dict keyed by entry index, each containing model results
+                # Structure: {entry_idx: {'vars': vars_map, 'results': {model: response}, 'performance_stats': {model: stats}}}
+                entry_results = {}
+                for prompt_data in all_prompts:
+                    entry_results[prompt_data['idx']] = {
+                        'vars': prompt_data['vars'],
+                        'results': {},
+                        'performance_stats': {},
+                        'validation': {}
+                    }
+                
+                # Step 2: Process each model across ALL test entries before moving to next model
+                total_operations = len(selected_models) * len(all_prompts)
+                current_op = 0
+                
+                for model_idx, model in enumerate(selected_models, start=1):
+                    if st.session_state.stop_inference:
+                        st.session_state.debug_info.append("Testset run stopped by user")
+                        consolidated_debug_info.append("Testset run stopped by user")
+                        break
+                    
+                    consolidated_debug_info.append(f"=== Loading model: {model} ===")
+                    
+                    # Process all entries with this model
+                    for prompt_data in all_prompts:
+                        if st.session_state.stop_inference:
+                            break
+                        
+                        entry_idx = prompt_data['idx']
+                        iter_prompt = prompt_data.get('prompt')
+                        
+                        if iter_prompt is None:
+                            # Skip entries that had formatting errors
+                            current_op += 1
+                            completed_batch_ops += 1
+                            continue
+                        
+                        current_op += 1
+                        iteration_info = f"{ts_name} | Model {model_idx}/{len(selected_models)}: {model} | Entry {entry_idx}/{len(all_prompts)}"
+                        
+                        # Set up streaming display if enabled
+                        streaming_display = streaming_section.empty() if enable_streaming else None
+                        
+                        try:
+                            if enable_streaming:
+                                progress_container.markdown(f"**{iteration_info}** | Starting...")
+                                progress_bar.progress(current_op / total_operations)
+                                st.session_state.current_streaming_text = ""
+                                
+                                response, stats = query_model_streaming(
+                                    model, iter_prompt, system_prompt, temperature,
+                                    progress_container, streaming_display
+                                )
+                            else:
+                                progress_container.markdown(f"**{iteration_info}**")
+                                progress_bar.progress(current_op / total_operations)
+                                response, stats = query_model(model, iter_prompt, system_prompt, temperature)
+                            
+                            entry_results[entry_idx]['results'][model] = response
+                            entry_results[entry_idx]['performance_stats'][model] = stats.to_dict()
+                            
+                            consolidated_debug_info.append(
+                                f"  Entry {entry_idx}: {stats.completion_tokens} tokens in {stats.total_time:.2f}s "
+                                f"({stats.tokens_per_second:.1f} tok/s)"
+                            )
+                            
+                        except Exception as e:
+                            error_msg = f"Error with {model} on entry {entry_idx}: {str(e)}"
+                            consolidated_debug_info.append(f"  {error_msg}")
+                            entry_results[entry_idx]['results'][model] = f"Error: {str(e)}"
+                            entry_results[entry_idx]['performance_stats'][model] = PerformanceStats(model_name=model).to_dict()
+                        
+                        # Update batch progress
+                        completed_batch_ops += 1
+                        batch_progress_bar.progress(completed_batch_ops / max(total_batch_ops, 1))
+                        batch_progress_container.markdown(f"**Batch Progress:** Testset {ts_idx}/{len(testsets)} | {completed_batch_ops}/{total_batch_ops} operations")
+                        
+                        if streaming_display:
+                            streaming_display.empty()
+                    
+                    consolidated_debug_info.append(f"=== Completed {model} for all entries ===")
+                    consolidated_debug_info.append("-" * 40)
+                
+                # Step 3: After all models have processed all entries, run the judge model for accuracy
+                evaluation_model_name = st.session_state.get("evaluation_model_value", "") or evaluation_model
+                has_expected_responses = any('_expected_responses' in prompt_data['vars'] for prompt_data in all_prompts)
+                
+                if evaluation_model_name and has_expected_responses:
+                    consolidated_debug_info.append(f"=== Loading judge model: {evaluation_model_name} ===")
+                    progress_container.markdown(f"**{ts_name}** | Running accuracy evaluation with {evaluation_model_name}...")
+                    
+                    total_judgments = sum(
+                        len(entry_results[prompt_data['idx']]['results']) 
+                        for prompt_data in all_prompts 
+                        if '_expected_responses' in prompt_data['vars']
                     )
-            
-            # Show consolidated debug info
-            with st.expander("Debug Information (All Runs)"):
-                st.code("\n".join(consolidated_debug_info))
+                    judgment_count = 0
+                    
+                    for prompt_data in all_prompts:
+                        if st.session_state.stop_inference:
+                            break
+                        
+                        entry_idx = prompt_data['idx']
+                        vars_map = prompt_data['vars']
+                        iter_prompt = prompt_data.get('prompt')
+                        
+                        if iter_prompt is None:
+                            continue
+                        
+                        # Get expected responses
+                        expected_resp_str = None
+                        if '_expected_responses' in vars_map:
+                            exps = vars_map['_expected_responses']
+                            if isinstance(exps, list):
+                                expected_resp_str = " | ".join(exps)
+                            else:
+                                expected_resp_str = str(exps)
+                        
+                        if expected_resp_str:
+                            consolidated_debug_info.append(f"  Judging entry {entry_idx}...")
+                            
+                            for model, response in entry_results[entry_idx]['results'].items():
+                                if st.session_state.stop_inference:
+                                    break
+                                
+                                judgment_count += 1
+                                progress_bar.progress(judgment_count / max(total_judgments, 1))
+                                progress_container.markdown(
+                                    f"**{ts_name}** | Judging entry {entry_idx}, model {model} ({judgment_count}/{total_judgments})"
+                                )
+                                
+                                try:
+                                    is_accurate = evaluate_response_accuracy(
+                                        evaluation_model_name, iter_prompt, response, expected_resp_str
+                                    )
+                                    entry_results[entry_idx]['validation'][model] = is_accurate
+                                    consolidated_debug_info.append(
+                                        f"    {model}: {'Accurate' if is_accurate else 'Not Accurate'}"
+                                    )
+                                except Exception as e:
+                                    consolidated_debug_info.append(f"    {model}: Error during judgment - {str(e)}")
+                                    entry_results[entry_idx]['validation'][model] = False
+                                
+                                # Update batch progress for judging
+                                completed_batch_ops += 1
+                                batch_progress_bar.progress(completed_batch_ops / max(total_batch_ops, 1))
+                                batch_progress_container.markdown(f"**Batch Progress:** Testset {ts_idx}/{len(testsets)} | {completed_batch_ops}/{total_batch_ops} operations")
+                    
+                    consolidated_debug_info.append(f"=== Completed accuracy evaluation ===")
+                elif not evaluation_model_name:
+                    st.warning("No evaluation model selected. Accuracy checking skipped.")
+                elif not has_expected_responses:
+                    st.warning("No expected responses found in testset. Accuracy checking skipped.")
+                
+                # Clear progress indicators
+                progress_bar.empty()
+                progress_container.empty()
+                streaming_section.empty()
+                
+                # Convert entry_results to the expected testset_results format
+                st.session_state.testset_results = [
+                    entry_results[prompt_data['idx']] for prompt_data in all_prompts
+                ]
+
+                assets = build_testset_report_assets(st.session_state.testset_results)
+                csv_df = assets.get('csv_df', pd.DataFrame())
+                csv_data = csv_df.to_csv(index=False) if not csv_df.empty else ""
+                st.session_state.testset_batch_reports.append({
+                    'name': ts_name,
+                    'rows': len(testset_rows),
+                    'csv': csv_data,
+                    'pdf': assets.get('pdf'),
+                    'agg_df': assets.get('agg_df')
+                })
+                batch_debug_logs.append({'name': ts_name, 'logs': consolidated_debug_info})
+                st.success(f"Completed {ts_name}")
+
+            # Clear batch progress indicators
+            batch_progress_bar.empty()
+            batch_progress_container.empty()
+
+            if st.session_state.testset_batch_reports:
+                st.success(f"Testset processing complete for {len(st.session_state.testset_batch_reports)} set(s)")
+                st.markdown("### Testset Reports")
+                for idx, report in enumerate(st.session_state.testset_batch_reports, start=1):
+                    safe_name = safe_filename(report.get('name')) or f"testset_{idx}"
+                    st.markdown(f"**{report.get('name', f'Testset {idx}')}** ({report.get('rows', 0)} rows)")
+                    if report.get('csv'):
+                        st.download_button(
+                            label="Download Results (CSV)",
+                            data=report['csv'],
+                            file_name=f"{safe_name}_results.csv",
+                            mime="text/csv",
+                            key=f"csv_{safe_name}_{idx}",
+                            use_container_width=True
+                        )
+                    if report.get('pdf'):
+                        pdf_bytes = report['pdf']
+                        pdf_data = pdf_bytes.encode('latin-1') if isinstance(pdf_bytes, str) else bytes(pdf_bytes)
+                        st.download_button(
+                            label="Download Testset PDF",
+                            data=pdf_data,
+                            file_name=f"{safe_name}_report.pdf",
+                            mime="application/pdf",
+                            key=f"pdf_{safe_name}_{idx}",
+                            use_container_width=True
+                        )
+                    st.divider()
+
+            if batch_debug_logs:
+                for entry in batch_debug_logs:
+                    with st.expander(f"Debug Information ({entry['name']})"):
+                        st.code("\n".join(entry['logs']))
         else:
             # Process models with or without spinner based on streaming setting
             if not enable_streaming:
@@ -2211,118 +2520,8 @@ if st.session_state.results:
         is_testset_mode = len(testset_results) > 0
         
         if is_testset_mode:
-            # Testset Logic
-            
-            # Aggregate stats
-            model_stats = {} # model -> {total_time: [], ttft: [], tps: [], accurate: []}
-            for item in testset_results:
-                perf = item.get('performance_stats', {})
-                validation = item.get('validation', {})
-                
-                for model_name, stats in perf.items():
-                    if model_name not in model_stats:
-                        model_stats[model_name] = {'total_time': [], 'ttft': [], 'tps': [], 'accurate': []}
-                    
-                    if stats:
-                        m_stats = model_stats[model_name]
-                        if 'total_time' in stats: m_stats['total_time'].append(stats['total_time'])
-                        if 'time_to_first_token' in stats: m_stats['ttft'].append(stats['time_to_first_token'])
-                        if 'tokens_per_second' in stats: m_stats['tps'].append(stats['tokens_per_second'])
-                        
-                    if model_name in validation:
-                        model_stats[model_name]['accurate'].append(1 if validation[model_name] else 0)
-
-            agg_data = []
-            for m, data in model_stats.items():
-                row = {'Model': m}
-                if data['total_time']: row['Total Time (seconds)'] = sum(data['total_time']) / len(data['total_time'])
-                if data['ttft']: row['Time to First Token (seconds)'] = sum(data['ttft']) / len(data['ttft'])
-                if data['tps']: row['Tokens per Second'] = sum(data['tps']) / len(data['tps'])
-                if data['accurate']: row['Accuracy'] = sum(data['accurate']) / len(data['accurate'])
-                # Add the raw count here
-                if data['accurate']: row['Accuracy_Count'] = f"({sum(data['accurate'])}/{len(data['accurate'])})"
-                
-                agg_data.append(row)
-            
-            agg_df = pd.DataFrame(agg_data)
-            
-            # Prepare rankings dict
-            rankings = {}
-            
-            if not agg_df.empty:
-                # 1. Total time & Time to first token (stacked bar chart)
-                try:
-                    time_fig = create_stacked_time_chart(agg_df)
-                    if time_fig:
-                        title = 'Average Latency Distribution (Stacked)'
-                        with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp:
-                            time_fig.savefig(tmp.name, format='png', dpi=150, bbox_inches='tight')
-                            chart_paths[title] = tmp.name
-                        plt.close(time_fig)
-                        
-                        # Rank by Total Time (lower is better)
-                        if 'Total Time (seconds)' in agg_df.columns:
-                            sorted_df = agg_df.sort_values(by='Total Time (seconds)', ascending=True)
-                            rankings[title] = []
-                            for _, r in sorted_df.iterrows():
-                                stats_str = f"Total: {r['Total Time (seconds)']:.2f}s"
-                                if 'Time to First Token (seconds)' in r:
-                                    stats_str += f" | TTFT: {r['Time to First Token (seconds)']:.3f}s"
-                                rankings[title].append({'model': r['Model'], 'stats': stats_str})
-
-                except Exception as e:
-                    st.warning(f"Could not generate stacked time chart: {e}")
-                
-                # 2. Tokens per second
-                if 'Tokens per Second' in agg_df.columns:
-                    try:
-                        speed_fig = create_speed_chart(agg_df)
-                        if speed_fig:
-                            title = 'Average Speed (Tokens/s)'
-                            with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp:
-                                speed_fig.savefig(tmp.name, format='png', dpi=150, bbox_inches='tight')
-                                chart_paths[title] = tmp.name
-                            plt.close(speed_fig)
-                            
-                            # Rank by Speed (higher is better)
-                            sorted_df = agg_df.sort_values(by='Tokens per Second', ascending=False)
-                            rankings[title] = []
-                            for _, r in sorted_df.iterrows():
-                                rankings[title].append({
-                                    'model': r['Model'], 
-                                    'stats': f"{r['Tokens per Second']:.1f} tok/s"
-                                })
-
-                    except Exception as e:
-                        st.warning(f"Could not generate speed chart: {e}")
-                
-                # 3. Accuracy
-                if 'Accuracy' in agg_df.columns:
-                    try:
-                        acc_fig = create_testset_accuracy_chart(agg_df)
-                        if acc_fig:
-                            title = 'Accuracy'
-                            with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp:
-                                acc_fig.savefig(tmp.name, format='png', dpi=150, bbox_inches='tight')
-                                chart_paths[title] = tmp.name
-                            plt.close(acc_fig)
-                            
-                            # Rank by Accuracy (higher is better)
-                            sorted_df = agg_df.sort_values(by='Accuracy', ascending=False)
-                            rankings[title] = []
-                            for _, r in sorted_df.iterrows():
-                                acc_pct = r['Accuracy'] * 100
-                                count_str = r.get('Accuracy_Count', '')
-                                rankings[title].append({
-                                    'model': r['Model'], 
-                                    'stats': f"{acc_pct:.1f}% {count_str}"
-                                })
-
-                    except Exception as e:
-                         st.warning(f"Could not generate accuracy chart: {e}")
-            
-            pdf_bytes = generate_testset_pdf_report(chart_paths, rankings)
-
+            assets = build_testset_report_assets(testset_results)
+            pdf_bytes = assets.get('pdf')
         else:
             # Speed Chart
             if len(st.session_state.performance_stats) > 0:
