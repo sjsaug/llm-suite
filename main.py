@@ -13,6 +13,7 @@ import time
 import csv
 import copy
 import tempfile
+import concurrent.futures
 from fpdf import FPDF
 try:
     from fpdf.enums import XPos, YPos
@@ -74,6 +75,30 @@ if 'testset_batch_debug_logs' not in st.session_state:
 # Persist uploaded testsets
 if 'prompt_testsets' not in st.session_state:
     st.session_state.prompt_testsets = []
+
+# Parallel prompt comparison results
+if 'parallel_prompt_results' not in st.session_state:
+    st.session_state.parallel_prompt_results = {}
+
+if 'parallel_prompt_stats' not in st.session_state:
+    st.session_state.parallel_prompt_stats = {}
+
+# Enhanced parallel comparison (multi-model, testset support)
+if 'parallel_results_all' not in st.session_state:
+    st.session_state.parallel_results_all = {}
+
+if 'parallel_stats_all' not in st.session_state:
+    st.session_state.parallel_stats_all = {}
+
+if 'parallel_testset_results' not in st.session_state:
+    st.session_state.parallel_testset_results = []
+
+if 'parallel_validation_results' not in st.session_state:
+    st.session_state.parallel_validation_results = {}
+
+# Store PDF reports for parallel prompts (each prompt gets its own report)
+if 'parallel_prompt_reports' not in st.session_state:
+    st.session_state.parallel_prompt_reports = {}  # Structure: {prompt_label: {'pdf': bytes, 'csv_df': df, 'agg_df': df}}
 
 # --- Performance Stats Data Class ---
 @dataclass
@@ -476,6 +501,101 @@ def extract_streaming_final_stats(chunk_data: dict, stats: PerformanceStats) -> 
     except Exception as e:
         st.session_state.debug_info.append(f"Error extracting streaming stats: {str(e)}")
     return stats
+
+
+def run_parallel_prompts(model_name: str, prompts: list, system_prompt_text: Optional[str] = None, 
+                         temp: float = 0.7, keep_alive: str = "10m") -> tuple:
+    """
+    Run the same model with multiple prompts in parallel using ThreadPoolExecutor.
+    
+    Args:
+        model_name: The name of the model to use
+        prompts: List of dicts with 'label' and 'prompt' keys
+        system_prompt_text: Optional system prompt
+        temp: Temperature setting
+        keep_alive: How long to keep model in memory
+    
+    Returns:
+        Tuple of (results dict, stats dict, debug_logs list)
+    """
+    results = {}
+    stats = {}
+    debug_logs = []  # Collect debug info locally to avoid thread-unsafe session_state access
+    
+    def execute_prompt(prompt_data):
+        """Execute a single prompt and return the result with stats."""
+        label = prompt_data['label']
+        prompt_text = prompt_data['prompt']
+        try:
+            # Use a local query function that doesn't access session_state
+            perf_stats = PerformanceStats(model_name=model_name)
+            start_time = time.time()
+            
+            params = {
+                "model": model_name,
+                "prompt": prompt_text,
+                "stream": False,
+                "options": {"temperature": temp},
+                "keep_alive": keep_alive
+            }
+            
+            if system_prompt_text and system_prompt_text.strip():
+                params["system"] = system_prompt_text
+            
+            response = ollama.generate(**params)
+            
+            end_time = time.time()
+            perf_stats.total_time = end_time - start_time
+            
+            # Extract stats from response
+            try:
+                if hasattr(response, 'total_duration'):
+                    perf_stats.total_time = response.total_duration / 1e9
+                if hasattr(response, 'load_duration'):
+                    perf_stats.load_duration_ms = response.load_duration / 1e6
+                if hasattr(response, 'eval_duration'):
+                    perf_stats.eval_duration_ms = response.eval_duration / 1e6
+                    perf_stats.time_to_completion = response.eval_duration / 1e9
+                if hasattr(response, 'prompt_eval_count'):
+                    perf_stats.prompt_tokens = response.prompt_eval_count or 0
+                if hasattr(response, 'eval_count'):
+                    perf_stats.completion_tokens = response.eval_count or 0
+                    perf_stats.total_tokens = perf_stats.prompt_tokens + perf_stats.completion_tokens
+            except Exception:
+                pass
+            
+            perf_stats.calculate_tokens_per_second()
+            
+            return label, response.response, perf_stats, None
+        except Exception as e:
+            error_stats = PerformanceStats(model_name=model_name)
+            return label, f"Error: {str(e)}", error_stats, str(e)
+    
+    # Execute all prompts in parallel using ThreadPoolExecutor
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(prompts)) as executor:
+        # Submit all tasks
+        futures = {
+            executor.submit(execute_prompt, prompt_data): prompt_data['label'] 
+            for prompt_data in prompts
+        }
+        
+        # Wait for all to complete
+        concurrent.futures.wait(futures.keys())
+        
+        # Collect results
+        for future in futures:
+            label, response, perf_stats, error = future.result()
+            results[label] = response
+            stats[label] = perf_stats
+            if error:
+                debug_logs.append(f"Parallel prompt '{label}' error: {error}")
+            else:
+                debug_logs.append(
+                    f"Parallel prompt '{label}': {perf_stats.completion_tokens} tokens in "
+                    f"{perf_stats.total_time:.2f}s ({perf_stats.tokens_per_second:.1f} tok/s)"
+                )
+    
+    return results, stats, debug_logs
 
 
 def evaluate_response_accuracy(judge_model: str, user_prompt: str, model_response: str, expected_responses: Optional[str] = None) -> bool:
@@ -1504,6 +1624,177 @@ def build_testset_report_assets(testset_results: List[Dict]) -> Dict[str, Any]:
     csv_df = aggregate_testset_results_to_dataframe(testset_results)
     return {"pdf": pdf_bytes, "csv_df": csv_df, "agg_df": agg_df}
 
+
+def build_parallel_prompt_report_assets(prompt_label: str, testset_results: List[Dict]) -> Dict[str, Any]:
+    """
+    Create PDF/CSV artifacts for a specific prompt from parallel testset results.
+    
+    Args:
+        prompt_label: The label of the prompt to generate report for
+        testset_results: List of iteration results from parallel comparison
+    
+    Returns:
+        Dictionary with 'pdf' (bytes), 'csv_df' (DataFrame), 'agg_df' (DataFrame)
+    """
+    if not testset_results:
+        return {"pdf": None, "csv_df": pd.DataFrame(), "agg_df": pd.DataFrame()}
+    
+    # Filter and aggregate stats for this specific prompt across all models/iterations
+    model_stats: Dict[str, Dict[str, List[float]]] = {}
+    
+    for result in testset_results:
+        model_name = result.get('model', 'Unknown')
+        stats = result.get('stats', {}).get(prompt_label, {})
+        validation = result.get('validation', {})
+        
+        if model_name not in model_stats:
+            model_stats[model_name] = {'total_time': [], 'ttft': [], 'tps': [], 'accurate': []}
+        
+        if stats:
+            model_stats[model_name]['total_time'].append(stats.get('total_time', 0))
+            model_stats[model_name]['ttft'].append(stats.get('time_to_first_token', 0))
+            model_stats[model_name]['tps'].append(stats.get('tokens_per_second', 0))
+        
+        # Check validation for this prompt
+        if prompt_label in validation:
+            model_stats[model_name]['accurate'].append(1 if validation[prompt_label] else 0)
+    
+    # Build aggregated dataframe
+    agg_data = []
+    for model_name, data in model_stats.items():
+        row: Dict[str, Any] = {'Model': model_name}
+        if data['total_time']:
+            row['Total Time (seconds)'] = sum(data['total_time']) / len(data['total_time'])
+        if data['ttft']:
+            row['Time to First Token (seconds)'] = sum(data['ttft']) / len(data['ttft'])
+        if data['tps']:
+            row['Tokens per Second'] = sum(data['tps']) / len(data['tps'])
+        if data['accurate']:
+            row['Accuracy'] = sum(data['accurate']) / len(data['accurate'])
+            row['Accuracy_Count'] = f"({sum(data['accurate'])}/{len(data['accurate'])})"
+        agg_data.append(row)
+    
+    agg_df = pd.DataFrame(agg_data)
+    chart_paths: Dict[str, str] = {}
+    rankings: Dict[str, List[Dict[str, str]]] = {}
+    
+    if not agg_df.empty:
+        import matplotlib.pyplot as plt
+        
+        # 1) Latency (stacked) chart
+        try:
+            if 'Total Time (seconds)' in agg_df.columns and 'Time to First Token (seconds)' in agg_df.columns:
+                time_fig = create_stacked_time_chart(agg_df)
+                if time_fig:
+                    title = f'Average Latency - {prompt_label}'
+                    with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp:
+                        time_fig.savefig(tmp.name, format='png', dpi=150, bbox_inches='tight')
+                        chart_paths[title] = tmp.name
+                    plt.close(time_fig)
+                    
+                    sorted_df = agg_df.sort_values(by='Total Time (seconds)', ascending=True)
+                    rankings[title] = []
+                    for _, row in sorted_df.iterrows():
+                        stats_str = f"Total: {row['Total Time (seconds)']:.2f}s"
+                        if 'Time to First Token (seconds)' in row:
+                            stats_str += f" | TTFT: {row['Time to First Token (seconds)']:.3f}s"
+                        rankings[title].append({'model': row['Model'], 'stats': stats_str})
+        except Exception:
+            pass
+        
+        # 2) Speed chart
+        if 'Tokens per Second' in agg_df.columns:
+            try:
+                speed_fig = create_speed_chart(agg_df)
+                if speed_fig:
+                    title = f'Average Speed - {prompt_label}'
+                    with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp:
+                        speed_fig.savefig(tmp.name, format='png', dpi=150, bbox_inches='tight')
+                        chart_paths[title] = tmp.name
+                    plt.close(speed_fig)
+                    
+                    sorted_df = agg_df.sort_values(by='Tokens per Second', ascending=False)
+                    rankings[title] = []
+                    for _, row in sorted_df.iterrows():
+                        rankings[title].append({'model': row['Model'], 'stats': f"{row['Tokens per Second']:.1f} tok/s"})
+            except Exception:
+                pass
+        
+        # 3) Accuracy chart
+        if 'Accuracy' in agg_df.columns:
+            try:
+                acc_fig = create_testset_accuracy_chart(agg_df)
+                if acc_fig:
+                    title = f'Accuracy - {prompt_label}'
+                    with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp:
+                        acc_fig.savefig(tmp.name, format='png', dpi=150, bbox_inches='tight')
+                        chart_paths[title] = tmp.name
+                    plt.close(acc_fig)
+                    
+                    sorted_df = agg_df.sort_values(by='Accuracy', ascending=False)
+                    rankings[title] = []
+                    for _, row in sorted_df.iterrows():
+                        acc_pct = row['Accuracy'] * 100
+                        count_str = row.get('Accuracy_Count', '')
+                        rankings[title].append({'model': row['Model'], 'stats': f"{acc_pct:.1f}% {count_str}"})
+            except Exception:
+                pass
+    
+    # Generate PDF report
+    pdf_bytes = generate_testset_pdf_report(chart_paths, rankings) if chart_paths else None
+    
+    # Cleanup temp chart files
+    for path in chart_paths.values():
+        try:
+            os.remove(path)
+        except Exception:
+            pass
+    
+    # Build CSV data for this prompt
+    csv_rows = []
+    for result in testset_results:
+        model_name = result.get('model', 'Unknown')
+        response = result.get('results', {}).get(prompt_label, '')
+        stats = result.get('stats', {}).get(prompt_label, {})
+        is_accurate = result.get('validation', {}).get(prompt_label, '')
+        
+        # Get expected responses for this prompt
+        expected = ''
+        if result.get('individual_mode'):
+            prompt_expected = result.get('prompt_expected_responses', {}).get(prompt_label, [])
+            expected = " | ".join(prompt_expected) if isinstance(prompt_expected, list) else str(prompt_expected)
+        else:
+            vars_map = result.get('vars', {})
+            if isinstance(vars_map, dict):
+                exp_resp = vars_map.get('_expected_responses', [])
+                expected = " | ".join(exp_resp) if isinstance(exp_resp, list) else str(exp_resp)
+        
+        # Get variables (non-internal)
+        vars_display = {}
+        if result.get('individual_mode'):
+            prompt_vars = result.get('vars', {}).get(prompt_label, {})
+            if isinstance(prompt_vars, dict):
+                vars_display = {k: v for k, v in prompt_vars.items() if not k.startswith('_')}
+        else:
+            vars_map = result.get('vars', {})
+            if isinstance(vars_map, dict):
+                vars_display = {k: v for k, v in vars_map.items() if not k.startswith('_')}
+        
+        csv_rows.append({
+            'iteration': result.get('iteration', 0),
+            'model': model_name,
+            'prompt_label': prompt_label,
+            **{f'var_{k}': v for k, v in vars_display.items()},
+            'response': response,
+            'expected': expected,
+            'is_accurate': is_accurate,
+            **{f'stat_{k}': v for k, v in stats.items()}
+        })
+    
+    csv_df = pd.DataFrame(csv_rows)
+    return {"pdf": pdf_bytes, "csv_df": csv_df, "agg_df": agg_df}
+
+
 def get_installed_model_names():
     _, models_info = get_available_models()
     return set(model["name"] for model in models_info)
@@ -1912,7 +2203,7 @@ if user_prompt:
         # Just catch it, we'll display error if they try to run
         template_error = f"Error parsing prompt template: {str(e)}"
 
-# Compare Models button
+# Compare Models button (standard comparison)
 compare_button = st.button("Compare Models", use_container_width=True)
 
 if template_error:
@@ -1927,6 +2218,754 @@ progress_bar = st.empty()
 
 # Section for live streaming display
 streaming_section = st.empty()
+
+# --- Parallel Prompt Comparison Section ---
+st.divider()
+st.header("Parallel Prompt Comparison")
+st.markdown("""
+Run multiple models with different prompt variations in parallel. Each model will process all prompts simultaneously, 
+then move to the next model. Supports template variables and testset loading for batch comparisons.
+""")
+
+# Initialize session state for parallel prompts
+if 'parallel_prompts' not in st.session_state:
+    st.session_state.parallel_prompts = [
+        {'label': 'Prompt A', 'prompt': ''},
+        {'label': 'Prompt B', 'prompt': ''}
+    ]
+
+if 'parallel_results_all' not in st.session_state:
+    st.session_state.parallel_results_all = {}  # Structure: {model: {prompt_label: response}}
+
+if 'parallel_stats_all' not in st.session_state:
+    st.session_state.parallel_stats_all = {}  # Structure: {model: {prompt_label: stats}}
+
+if 'parallel_testset_results' not in st.session_state:
+    st.session_state.parallel_testset_results = []  # List of iteration results
+
+if 'parallel_validation_results' not in st.session_state:
+    st.session_state.parallel_validation_results = {}  # Structure: {model: {prompt_label: {iteration: is_accurate}}}
+
+# Model selection - use checkboxes to select multiple models
+st.markdown("### Select Models")
+st.markdown("Select one or more models to run with parallel prompts:")
+
+base_model_names_parallel, models_info_parallel = get_available_models()
+model_names_list_parallel = [model["name"] for model in models_info_parallel]
+
+parallel_selected_models = []
+if model_names_list_parallel:
+    # Use the same models selected in the sidebar, or allow separate selection
+    use_sidebar_models = st.checkbox(
+        "Use models selected in sidebar", 
+        value=True, 
+        key="parallel_use_sidebar_models",
+        help="If checked, uses the same models selected in the Models tab"
+    )
+    
+    if use_sidebar_models:
+        parallel_selected_models = selected_models if selected_models else []
+        if parallel_selected_models:
+            st.info(f"Using {len(parallel_selected_models)} model(s) from sidebar: {', '.join(parallel_selected_models)}")
+        else:
+            st.warning("No models selected in sidebar. Please select models in the Models tab or uncheck this option.")
+    else:
+        # Show multiselect for parallel-specific model selection
+        parallel_selected_models = st.multiselect(
+            "Select models for parallel comparison",
+            options=model_names_list_parallel,
+            default=[],
+            key="parallel_model_multiselect",
+            help="Select one or more models to run with parallel prompts"
+        )
+else:
+    st.warning("No models available. Please ensure Ollama is running.")
+
+# Number of prompts control
+num_prompts = st.number_input(
+    "Number of parallel prompts",
+    min_value=2,
+    max_value=10,
+    value=len(st.session_state.parallel_prompts),
+    key="num_parallel_prompts",
+    help="How many different prompts to run in parallel (2-10)"
+)
+
+# Adjust parallel_prompts list based on num_prompts
+if num_prompts > len(st.session_state.parallel_prompts):
+    for i in range(len(st.session_state.parallel_prompts), num_prompts):
+        st.session_state.parallel_prompts.append({'label': f'Prompt {chr(65+i)}', 'prompt': ''})
+elif num_prompts < len(st.session_state.parallel_prompts):
+    st.session_state.parallel_prompts = st.session_state.parallel_prompts[:num_prompts]
+
+# Display prompt inputs
+st.markdown("### Define Prompt Templates")
+st.markdown("Use `{variable_name}` syntax to include template variables that can be filled from testsets.")
+
+# Option for individual testsets per prompt
+use_individual_testsets = st.checkbox(
+    "Use individual testsets for each prompt",
+    value=False,
+    key="use_individual_testsets",
+    help="When enabled, you can upload a separate testset file for each prompt template"
+)
+
+parallel_prompts_data = []
+parallel_prompt_vars = set()  # Collect all variables across prompts
+individual_testsets = {}  # Store testsets per prompt label
+individual_prompt_vars = {}  # Store detected vars per prompt
+
+for i, prompt_data in enumerate(st.session_state.parallel_prompts):
+    with st.expander(f"**{prompt_data['label']}**", expanded=True):
+        col1, col2 = st.columns([1, 4])
+        with col1:
+            label = st.text_input(
+                "Label",
+                value=prompt_data['label'],
+                key=f"parallel_label_{i}",
+                help="A short identifier for this prompt"
+            )
+        with col2:
+            prompt_text = st.text_area(
+                "Prompt Template",
+                value=prompt_data['prompt'],
+                key=f"parallel_prompt_{i}",
+                height=100,
+                help="The prompt text. Use {var_name} for template variables."
+            )
+        
+        # Detect variables in this prompt
+        prompt_specific_vars = set()
+        if prompt_text:
+            try:
+                temp_template = ChatPromptTemplate.from_template(prompt_text)
+                prompt_specific_vars = set(temp_template.input_variables)
+                parallel_prompt_vars.update(prompt_specific_vars)
+            except:
+                pass
+        
+        # Show detected variables for this prompt
+        if prompt_specific_vars:
+            st.caption(f"Variables: {', '.join(sorted(prompt_specific_vars))}")
+        
+        # Individual testset upload (when enabled)
+        if use_individual_testsets and label and prompt_text:
+            st.markdown("---")
+            individual_testset_file = st.file_uploader(
+                f"Testset for {label}",
+                type=['csv', 'txt'],
+                key=f'individual_testset_{i}',
+                help=f"Upload a testset file specific to this prompt. Should contain columns: {', '.join(sorted(prompt_specific_vars)) if prompt_specific_vars else 'matching your variables'}"
+            )
+            
+            if individual_testset_file and prompt_specific_vars:
+                try:
+                    rows = parse_testset_file(individual_testset_file, list(prompt_specific_vars))
+                    individual_testsets[label] = rows
+                    individual_prompt_vars[label] = prompt_specific_vars
+                    st.success(f"Parsed {len(rows)} rows")
+                    
+                    # Check for expected responses
+                    has_expected = any('_expected_responses' in row for row in rows)
+                    if has_expected:
+                        st.caption("✓ Expected responses detected")
+                except Exception as e:
+                    st.error(f"Error parsing: {e}")
+        
+        # Update session state
+        st.session_state.parallel_prompts[i] = {'label': label, 'prompt': prompt_text}
+        
+        if label and prompt_text:
+            parallel_prompts_data.append({'label': label, 'prompt': prompt_text, 'vars': prompt_specific_vars})
+
+# Show detected variables
+if parallel_prompt_vars:
+    st.info(f"Detected template variables (all prompts): {', '.join(sorted(parallel_prompt_vars))}")
+
+# --- Testset Upload for Parallel Prompts ---
+# Only show shared testset upload when NOT using individual testsets
+parallel_testset_rows = []
+
+if not use_individual_testsets:
+    st.markdown("### Shared Testset for All Prompts (Optional)")
+    st.markdown("Upload a testset file to run all parallel prompts across multiple variable combinations.")
+
+    parallel_testset_file = st.file_uploader(
+        "Upload testset file (CSV or pipe-delimited)",
+        type=['csv', 'txt'],
+        key='parallel_testset_uploader',
+        help="File should contain columns matching template variables. Use ||| as delimiter for complex data."
+    )
+
+    if parallel_testset_file and parallel_prompt_vars:
+        try:
+            parallel_testset_rows = parse_testset_file(parallel_testset_file, list(parallel_prompt_vars))
+            st.success(f"Parsed {len(parallel_testset_rows)} rows from testset")
+            if parallel_testset_rows:
+                # Show preview
+                preview_df = pd.DataFrame([{k: v for k, v in row.items() if not k.startswith('_')} 
+                                           for row in parallel_testset_rows[:5]])
+                st.dataframe(preview_df, use_container_width=True)
+                
+                # Check for expected responses
+                has_expected = any('_expected_responses' in row for row in parallel_testset_rows)
+                if has_expected:
+                    st.info("✓ Expected responses detected - accuracy checking will be enabled")
+        except Exception as e:
+            st.error(f"Error parsing testset: {e}")
+else:
+    # Show summary of individual testsets
+    if individual_testsets:
+        st.markdown("### Individual Testsets Summary")
+        for prompt_label, rows in individual_testsets.items():
+            has_expected = any('_expected_responses' in row for row in rows)
+            expected_indicator = " ✓" if has_expected else ""
+            st.caption(f"**{prompt_label}**: {len(rows)} rows{expected_indicator}")
+
+# Manual variable input (if no testset or for single run, and not using individual testsets)
+parallel_manual_vars = {}
+if parallel_prompt_vars and not parallel_testset_rows and not use_individual_testsets:
+    st.markdown("#### Manual Variable Input")
+    var_cols = st.columns(min(3, len(parallel_prompt_vars)))
+    for i, var in enumerate(sorted(parallel_prompt_vars)):
+        with var_cols[i % len(var_cols)]:
+            parallel_manual_vars[var] = st.text_input(
+                f"Value for {{{var}}}",
+                key=f"parallel_var_{var}"
+            )
+
+# Button to run parallel prompts
+parallel_compare_button = st.button(
+    "Run Parallel Comparison", 
+    use_container_width=True,
+    disabled=len(parallel_selected_models) == 0 or len(parallel_prompts_data) < 2,
+    key="parallel_compare_btn"
+)
+
+# Handle parallel comparison execution
+if parallel_compare_button:
+    if len(parallel_prompts_data) < 2:
+        st.error("Please define at least 2 prompts with labels to run parallel comparison.")
+    elif not parallel_selected_models:
+        st.error("Please select at least one model for parallel comparison.")
+    else:
+        # Clear previous results
+        st.session_state.parallel_results_all = {}
+        st.session_state.parallel_stats_all = {}
+        st.session_state.parallel_testset_results = []
+        st.session_state.parallel_validation_results = {}
+        st.session_state.parallel_prompt_reports = {}
+        st.session_state.debug_info = []
+        
+        # Determine execution mode based on testset configuration
+        use_individual_mode = use_individual_testsets and individual_testsets
+        
+        if use_individual_mode:
+            # Individual testsets mode: each prompt has its own testset
+            # Find max iterations across all individual testsets
+            max_iterations = max(len(rows) for rows in individual_testsets.values()) if individual_testsets else 1
+            
+            # Create iteration structure where each prompt uses its own testset row
+            iterations = []
+            for iter_idx in range(max_iterations):
+                iter_data = {
+                    '_individual_mode': True,
+                    '_iteration_index': iter_idx
+                }
+                # For each prompt, get its corresponding testset row (or cycle if shorter)
+                for prompt_label, testset_rows in individual_testsets.items():
+                    if testset_rows:
+                        row_idx = iter_idx % len(testset_rows)
+                        iter_data[prompt_label] = testset_rows[row_idx]
+                iterations.append(iter_data)
+            
+            st.session_state.debug_info.append(
+                f"Individual testsets mode: {len(individual_testsets)} prompts with testsets, "
+                f"{max_iterations} max iterations"
+            )
+        elif parallel_testset_rows:
+            # Shared testset mode
+            iterations = parallel_testset_rows
+        elif parallel_prompt_vars and all(parallel_manual_vars.get(v) for v in parallel_prompt_vars):
+            iterations = [parallel_manual_vars]
+        elif not parallel_prompt_vars:
+            # No variables, just run prompts as-is
+            iterations = [{}]
+        else:
+            st.error("Please provide values for all template variables or upload a testset.")
+            iterations = []
+        
+        if iterations:
+            total_operations = len(parallel_selected_models) * len(parallel_prompts_data) * len(iterations)
+            st.session_state.debug_info.append(
+                f"Starting parallel comparison: {len(parallel_selected_models)} models × "
+                f"{len(parallel_prompts_data)} prompts × {len(iterations)} iterations = {total_operations} total operations"
+            )
+            
+            # Progress tracking
+            parallel_progress_bar = st.progress(0)
+            parallel_status = st.empty()
+            completed_ops = 0
+            
+            # Process each model
+            for model_idx, model_name in enumerate(parallel_selected_models):
+                if st.session_state.get('stop_inference', False):
+                    break
+                    
+                st.session_state.parallel_results_all[model_name] = {}
+                st.session_state.parallel_stats_all[model_name] = {}
+                
+                parallel_status.markdown(f"**Processing model {model_idx + 1}/{len(parallel_selected_models)}: {model_name}**")
+                st.session_state.debug_info.append(f"\n=== Model: {model_name} ===")
+                
+                # Process each iteration (testset row or single run)
+                for iter_idx, vars_map in enumerate(iterations):
+                    if st.session_state.get('stop_inference', False):
+                        break
+                    
+                    # Check if this is individual testset mode
+                    is_individual_mode = vars_map.get('_individual_mode', False) if isinstance(vars_map, dict) else False
+                    
+                    # Build formatted prompts for this iteration
+                    formatted_prompts = []
+                    prompt_expected_responses = {}  # Store expected responses per prompt for individual mode
+                    
+                    for prompt_data in parallel_prompts_data:
+                        prompt_label = prompt_data['label']
+                        try:
+                            if is_individual_mode:
+                                # Individual testset mode: get vars specific to this prompt
+                                prompt_vars = vars_map.get(prompt_label, {})
+                                if prompt_vars and isinstance(prompt_vars, dict):
+                                    # Store expected responses for this prompt
+                                    if '_expected_responses' in prompt_vars:
+                                        prompt_expected_responses[prompt_label] = prompt_vars['_expected_responses']
+                                    
+                                    # Format with prompt-specific variables
+                                    temp_template = ChatPromptTemplate.from_template(prompt_data['prompt'])
+                                    # Filter to only vars needed by this prompt
+                                    relevant_vars = {k: v for k, v in prompt_vars.items() if not k.startswith('_')}
+                                    messages = temp_template.format_messages(**relevant_vars)
+                                    if messages and hasattr(messages[0], 'content'):
+                                        formatted_text = messages[0].content
+                                    else:
+                                        formatted_text = temp_template.format(**relevant_vars)
+                                else:
+                                    formatted_text = prompt_data['prompt']
+                            elif vars_map and parallel_prompt_vars:
+                                # Shared testset mode: format the prompt with shared variables
+                                temp_template = ChatPromptTemplate.from_template(prompt_data['prompt'])
+                                messages = temp_template.format_messages(**vars_map)
+                                if messages and hasattr(messages[0], 'content'):
+                                    formatted_text = messages[0].content
+                                else:
+                                    formatted_text = temp_template.format(**vars_map)
+                            else:
+                                formatted_text = prompt_data['prompt']
+                            
+                            formatted_prompts.append({
+                                'label': prompt_label,
+                                'prompt': formatted_text,
+                                'original': prompt_data['prompt']
+                            })
+                        except Exception as e:
+                            st.session_state.debug_info.append(f"Error formatting {prompt_label}: {e}")
+                            formatted_prompts.append({
+                                'label': prompt_label,
+                                'prompt': prompt_data['prompt'],
+                                'original': prompt_data['prompt'],
+                                'error': str(e)
+                            })
+                    
+                    # Run all prompts in parallel for this model and iteration
+                    iter_label = f"Iteration {iter_idx + 1}" if len(iterations) > 1 else "Single Run"
+                    parallel_status.markdown(
+                        f"**Model {model_idx + 1}/{len(parallel_selected_models)}: {model_name}** | "
+                        f"**{iter_label}/{len(iterations)}** | Running {len(formatted_prompts)} prompts in parallel..."
+                    )
+                    
+                    results, stats, debug_logs = run_parallel_prompts(
+                        model_name,
+                        formatted_prompts,
+                        system_prompt,
+                        temperature
+                    )
+                    
+                    # Append collected debug logs to session state (thread-safe now)
+                    st.session_state.debug_info.extend(debug_logs)
+                    
+                    # Store results - include per-prompt vars for individual mode
+                    iteration_result = {
+                        'iteration': iter_idx + 1,
+                        'vars': vars_map,
+                        'model': model_name,
+                        'results': results,
+                        'stats': {k: v.to_dict() if hasattr(v, 'to_dict') else {} for k, v in stats.items()},
+                        'validation': {},
+                        'individual_mode': is_individual_mode,
+                        'prompt_expected_responses': prompt_expected_responses
+                    }
+                    
+                    # Update aggregate results (for single iteration display)
+                    if len(iterations) == 1:
+                        st.session_state.parallel_results_all[model_name] = results
+                        st.session_state.parallel_stats_all[model_name] = stats
+                    
+                    # Run accuracy checking if expected responses exist
+                    eval_model = st.session_state.get("evaluation_model_value", "") or evaluation_model
+                    
+                    if is_individual_mode and prompt_expected_responses:
+                        # Individual mode: each prompt has its own expected responses
+                        if eval_model:
+                            for prompt_label, response in results.items():
+                                expected = prompt_expected_responses.get(prompt_label, [])
+                                if expected:
+                                    expected_str = " | ".join(expected) if isinstance(expected, list) else str(expected)
+                                    try:
+                                        formatted_prompt = next(
+                                            (p['prompt'] for p in formatted_prompts if p['label'] == prompt_label), 
+                                            ""
+                                        )
+                                        is_accurate = evaluate_response_accuracy(
+                                            eval_model, formatted_prompt, response, expected_str
+                                        )
+                                        iteration_result['validation'][prompt_label] = is_accurate
+                                        st.session_state.debug_info.append(
+                                            f"  {prompt_label}: {'✓ Accurate' if is_accurate else '✗ Not Accurate'}"
+                                        )
+                                    except Exception as e:
+                                        st.session_state.debug_info.append(f"  {prompt_label}: Error judging - {e}")
+                                        iteration_result['validation'][prompt_label] = False
+                    else:
+                        # Shared mode: all prompts use the same expected responses
+                        expected_responses = vars_map.get('_expected_responses', []) if vars_map and isinstance(vars_map, dict) else []
+                        if expected_responses:
+                            expected_str = " | ".join(expected_responses) if isinstance(expected_responses, list) else str(expected_responses)
+                            
+                            if eval_model:
+                                for prompt_label, response in results.items():
+                                    try:
+                                        # Get the formatted prompt for context
+                                        formatted_prompt = next(
+                                            (p['prompt'] for p in formatted_prompts if p['label'] == prompt_label), 
+                                            ""
+                                        )
+                                        is_accurate = evaluate_response_accuracy(
+                                            eval_model, formatted_prompt, response, expected_str
+                                        )
+                                        iteration_result['validation'][prompt_label] = is_accurate
+                                        st.session_state.debug_info.append(
+                                            f"  {prompt_label}: {'✓ Accurate' if is_accurate else '✗ Not Accurate'}"
+                                        )
+                                    except Exception as e:
+                                        st.session_state.debug_info.append(f"  {prompt_label}: Error judging - {e}")
+                                        iteration_result['validation'][prompt_label] = False
+                    
+                    st.session_state.parallel_testset_results.append(iteration_result)
+                    
+                    completed_ops += len(formatted_prompts)
+                    parallel_progress_bar.progress(completed_ops / total_operations)
+            
+            parallel_progress_bar.empty()
+            parallel_status.empty()
+            
+            # Generate PDF reports for each prompt (individual testset mode or shared testset mode)
+            if use_individual_mode or len(iterations) > 1:
+                st.session_state.parallel_prompt_reports = {}
+                parallel_status.markdown("**Generating PDF reports for each prompt...**")
+                
+                # Get unique prompt labels from the results
+                prompt_labels = set()
+                for result in st.session_state.parallel_testset_results:
+                    prompt_labels.update(result.get('results', {}).keys())
+                
+                for prompt_label in prompt_labels:
+                    try:
+                        assets = build_parallel_prompt_report_assets(
+                            prompt_label, 
+                            st.session_state.parallel_testset_results
+                        )
+                        st.session_state.parallel_prompt_reports[prompt_label] = assets
+                        st.session_state.debug_info.append(f"Generated PDF report for prompt: {prompt_label}")
+                    except Exception as e:
+                        st.session_state.debug_info.append(f"Error generating PDF for {prompt_label}: {e}")
+                
+                parallel_status.empty()
+            
+            st.success(f"Completed parallel comparison across {len(parallel_selected_models)} model(s)!")
+
+# Display parallel comparison results
+if st.session_state.parallel_results_all or st.session_state.parallel_testset_results:
+    st.markdown("### Parallel Comparison Results")
+    
+    # Check if this is a testset run with multiple iterations
+    is_testset_run = len(st.session_state.parallel_testset_results) > len(parallel_selected_models) if parallel_selected_models else False
+    
+    if is_testset_run:
+        # Testset results view
+        st.markdown("#### Testset Results Summary")
+        
+        # Aggregate stats by model and prompt label
+        agg_data = {}
+        for result in st.session_state.parallel_testset_results:
+            model = result['model']
+            if model not in agg_data:
+                agg_data[model] = {}
+            
+            for prompt_label, response in result['results'].items():
+                if prompt_label not in agg_data[model]:
+                    agg_data[model][prompt_label] = {
+                        'count': 0,
+                        'accurate': 0,
+                        'total_time': 0,
+                        'total_tokens': 0
+                    }
+                
+                agg_data[model][prompt_label]['count'] += 1
+                if result['validation'].get(prompt_label, False):
+                    agg_data[model][prompt_label]['accurate'] += 1
+                
+                stats = result['stats'].get(prompt_label, {})
+                agg_data[model][prompt_label]['total_time'] += stats.get('total_time', 0)
+                agg_data[model][prompt_label]['total_tokens'] += stats.get('completion_tokens', 0)
+        
+        # Create summary table
+        summary_rows = []
+        for model, prompts in agg_data.items():
+            for prompt_label, data in prompts.items():
+                accuracy_pct = (data['accurate'] / data['count'] * 100) if data['count'] > 0 else 0
+                avg_time = data['total_time'] / data['count'] if data['count'] > 0 else 0
+                summary_rows.append({
+                    'Model': model,
+                    'Prompt': prompt_label,
+                    'Iterations': data['count'],
+                    'Accurate': data['accurate'],
+                    'Accuracy %': f"{accuracy_pct:.1f}%",
+                    'Avg Time (s)': round(avg_time, 2),
+                    'Total Tokens': data['total_tokens']
+                })
+        
+        if summary_rows:
+            summary_df = pd.DataFrame(summary_rows)
+            st.dataframe(summary_df, use_container_width=True, hide_index=True)
+        
+        # Detailed results in expander
+        with st.expander("Detailed Iteration Results"):
+            for result in st.session_state.parallel_testset_results:
+                vars_display = {k: v for k, v in result['vars'].items() if not k.startswith('_')}
+                st.markdown(f"**{result['model']}** - Iteration {result['iteration']}: {vars_display}")
+                
+                result_cols = st.columns(len(result['results']))
+                for i, (label, response) in enumerate(result['results'].items()):
+                    with result_cols[i]:
+                        is_accurate = result['validation'].get(label)
+                        accuracy_icon = "✓" if is_accurate else "✗" if is_accurate is not None else ""
+                        st.markdown(f"**{label}** {accuracy_icon}")
+                        st.text(response[:200] + "..." if len(response) > 200 else response)
+                st.divider()
+        
+        # Export testset results
+        st.markdown("#### Export Testset Results")
+        
+        # Build CSV data
+        csv_rows = []
+        for result in st.session_state.parallel_testset_results:
+            vars_display = {k: v for k, v in result['vars'].items() if not k.startswith('_')}
+            expected = result['vars'].get('_expected_responses', [])
+            expected_str = " | ".join(expected) if isinstance(expected, list) else str(expected)
+            
+            for prompt_label, response in result['results'].items():
+                csv_rows.append({
+                    'iteration': result['iteration'],
+                    'model': result['model'],
+                    'prompt_label': prompt_label,
+                    **{f'var_{k}': v for k, v in vars_display.items()},
+                    'response': response,
+                    'expected': expected_str,
+                    'is_accurate': result['validation'].get(prompt_label, ''),
+                    **{f'stat_{k}': v for k, v in result['stats'].get(prompt_label, {}).items()}
+                })
+        
+        if csv_rows:
+            csv_df = pd.DataFrame(csv_rows)
+            col1, col2 = st.columns(2)
+            with col1:
+                st.download_button(
+                    label="Download Testset Results (CSV)",
+                    data=csv_df.to_csv(index=False),
+                    file_name="parallel_testset_results.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                    key="parallel_testset_csv_download"
+                )
+            with col2:
+                st.download_button(
+                    label="Download Testset Results (JSON)",
+                    data=json.dumps(st.session_state.parallel_testset_results, indent=2, default=str),
+                    file_name="parallel_testset_results.json",
+                    mime="application/json",
+                    use_container_width=True,
+                    key="parallel_testset_json_download"
+                )
+        
+        # Display PDF reports for each prompt
+        if st.session_state.get('parallel_prompt_reports'):
+            st.markdown("#### PDF Reports by Prompt")
+            st.markdown("Each prompt has its own PDF report with performance charts and accuracy metrics.")
+            
+            for prompt_label, assets in st.session_state.parallel_prompt_reports.items():
+                safe_name = safe_filename(prompt_label) or f"prompt_{prompt_label}"
+                
+                with st.expander(f"**{prompt_label}** Report", expanded=False):
+                    col1, col2, col3 = st.columns(3)
+                    
+                    # PDF download
+                    if assets.get('pdf'):
+                        with col1:
+                            st.download_button(
+                                label=f"📄 PDF Report",
+                                data=assets['pdf'],
+                                file_name=f"parallel_{safe_name}_report.pdf",
+                                mime="application/pdf",
+                                use_container_width=True,
+                                key=f"parallel_pdf_{safe_name}"
+                            )
+                    
+                    # CSV download
+                    csv_df = assets.get('csv_df')
+                    if csv_df is not None and not csv_df.empty:
+                        with col2:
+                            st.download_button(
+                                label=f"📊 CSV Data",
+                                data=csv_df.to_csv(index=False),
+                                file_name=f"parallel_{safe_name}_results.csv",
+                                mime="text/csv",
+                                use_container_width=True,
+                                key=f"parallel_csv_{safe_name}"
+                            )
+                    
+                    # Show aggregated stats summary
+                    agg_df = assets.get('agg_df')
+                    if agg_df is not None and not agg_df.empty:
+                        with col3:
+                            st.caption("Summary Stats")
+                        st.dataframe(agg_df, use_container_width=True, hide_index=True)
+    
+    else:
+        # Single run results view (multiple models, single iteration)
+        if st.session_state.parallel_results_all:
+            # Performance stats table across all models
+            with st.expander("Performance Statistics", expanded=True):
+                stats_data = []
+                for model_name, prompt_stats in st.session_state.parallel_stats_all.items():
+                    for label, stats in prompt_stats.items():
+                        stats_data.append({
+                            "Model": model_name,
+                            "Prompt": label,
+                            "Total Time (s)": round(stats.total_time, 2) if hasattr(stats, 'total_time') else 0,
+                            "Tokens Generated": stats.completion_tokens if hasattr(stats, 'completion_tokens') else 0,
+                            "Tokens/sec": round(stats.tokens_per_second, 1) if hasattr(stats, 'tokens_per_second') else 0,
+                        })
+                
+                if stats_data:
+                    parallel_stats_df = pd.DataFrame(stats_data)
+                    st.dataframe(parallel_stats_df, use_container_width=True, hide_index=True)
+            
+            # Results display - organized by model
+            for model_name, results in st.session_state.parallel_results_all.items():
+                st.markdown(f"#### Model: {model_name}")
+                
+                result_labels = list(results.keys())
+                if len(result_labels) <= 3:
+                    cols = st.columns(len(result_labels))
+                    for i, label in enumerate(result_labels):
+                        with cols[i]:
+                            response = results[label]
+                            if remove_think_blocks_setting:
+                                response = remove_think_blocks(response)
+                            st.markdown(f"**{label}**")
+                            st.markdown(f"<div class='model-response'>{html.escape(response)}</div>", 
+                                       unsafe_allow_html=True)
+                else:
+                    tabs = st.tabs(result_labels)
+                    for i, label in enumerate(result_labels):
+                        with tabs[i]:
+                            response = results[label]
+                            if remove_think_blocks_setting:
+                                response = remove_think_blocks(response)
+                            st.markdown(f"<div class='model-response'>{html.escape(response)}</div>", 
+                                       unsafe_allow_html=True)
+                
+                st.divider()
+            
+            # Export options
+            st.markdown("### Export Parallel Results")
+            
+            # Build flat results for CSV
+            csv_rows = []
+            for model_name, results in st.session_state.parallel_results_all.items():
+                for label, response in results.items():
+                    stats = st.session_state.parallel_stats_all.get(model_name, {}).get(label)
+                    csv_rows.append({
+                        "Model": model_name,
+                        "Prompt Label": label,
+                        "Response": response,
+                        "Response Length": len(response),
+                        "Total Time (s)": stats.total_time if stats and hasattr(stats, 'total_time') else '',
+                        "Tokens Generated": stats.completion_tokens if stats and hasattr(stats, 'completion_tokens') else '',
+                    })
+            
+            parallel_results_df = pd.DataFrame(csv_rows)
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                st.download_button(
+                    label="Download Parallel Results (CSV)",
+                    data=parallel_results_df.to_csv(index=False),
+                    file_name="parallel_prompt_comparison.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                    key="parallel_csv_download"
+                )
+            
+            with col2:
+                parallel_json_data = {
+                    "models": list(st.session_state.parallel_results_all.keys()),
+                    "system_prompt": system_prompt,
+                    "temperature": temperature,
+                    "prompts": parallel_prompts_data,
+                    "results_by_model": {
+                        model: {
+                            "responses": results,
+                            "stats": {
+                                k: v.to_dict() if hasattr(v, 'to_dict') else {}
+                                for k, v in st.session_state.parallel_stats_all.get(model, {}).items()
+                            }
+                        }
+                        for model, results in st.session_state.parallel_results_all.items()
+                    }
+                }
+                st.download_button(
+                    label="Download Parallel Results (JSON)",
+                    data=json.dumps(parallel_json_data, indent=2),
+                    file_name="parallel_prompt_comparison.json",
+                    mime="application/json",
+                    use_container_width=True,
+                    key="parallel_json_download"
+                )
+    
+    # Debug info for parallel runs
+    with st.expander("Parallel Run Debug Information"):
+        st.code("\n".join(st.session_state.debug_info))
+    
+    # Clear results button
+    if st.button("Clear Parallel Results", key="clear_parallel_results"):
+        st.session_state.parallel_results_all = {}
+        st.session_state.parallel_stats_all = {}
+        st.session_state.parallel_testset_results = []
+        st.session_state.parallel_validation_results = {}
+        st.session_state.parallel_prompt_reports = {}
+        st.rerun()
 
 # Define the model processing function
 def process_models(selected_models, system_prompt_text=None, user_prompt_text=None, iteration_info=None, render_debug=True):
@@ -2013,6 +3052,7 @@ def process_models(selected_models, system_prompt_text=None, user_prompt_text=No
     
     # Set inference running flag to false
     st.session_state.inference_running = False
+
 
 def remove_think_blocks(text):
     return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
