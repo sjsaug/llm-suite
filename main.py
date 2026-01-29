@@ -24,6 +24,15 @@ from langchain_core.prompts import ChatPromptTemplate
 from dataclasses import dataclass, field, asdict
 from typing import Dict, List, Any
 
+def sanitize_key(key: str) -> str:
+    """Sanitize a string to be used as a Streamlit widget key.
+    
+    Replaces characters that are invalid in HTML element IDs (like colons)
+    with underscores to prevent InvalidCharacterError in the browser.
+    """
+    # Replace colons and other problematic characters with underscores
+    return re.sub(r'[^a-zA-Z0-9_\-]', '_', key)
+
 # st page config
 st.set_page_config(
     page_title="LLM Suite",
@@ -442,7 +451,7 @@ def query_model_streaming(model_name: str, prompt: str, system_prompt: Optional[
                 # Update the streaming display with current text
                 if streaming_display:
                     st.session_state.current_streaming_text = full_response
-                    streaming_display.markdown(f"<div class='model-response'>{full_response}</div>", 
+                    streaming_display.markdown(f"<div class='model-response'>{html.escape(full_response)}</div>", 
                                                unsafe_allow_html=True)
                 
                 # Update the progress text and length counter
@@ -1854,7 +1863,7 @@ with st.sidebar:
                         # If model should be pre-selected based on profile
                         preselect = model_name in models_to_preselect
                         
-                        if st.checkbox(f"{model_name}", key=f"model_{model_name}", 
+                        if st.checkbox(f"{model_name}", key=f"model_{sanitize_key(model_name)}", 
                                       help=help_text, value=preselect):
                             selected_models.append(model_name)
                 else:
@@ -1865,7 +1874,7 @@ with st.sidebar:
                         
                         select_all_family = st.checkbox(
                             f"Select all {base_name} versions",
-                            key=f"select_all_{base_name}",
+                            key=f"select_all_{sanitize_key(base_name)}",
                             value=all_family_selected
                         )
                         if select_all_family:
@@ -1890,7 +1899,7 @@ with st.sidebar:
                                 # Pre-select models from loaded profile
                                 preselect = version in models_to_preselect
                                 
-                                if st.checkbox(f"{version}", key=f"model_{version}", 
+                                if st.checkbox(f"{version}", key=f"model_{sanitize_key(version)}", 
                                               help=help_text, value=preselect):
                                     selected_models.append(version)
                                 elif version in selected_models:
@@ -1938,7 +1947,7 @@ with st.sidebar:
                 # Use a single checkbox with help tooltip
                 remove_checks[model["name"]] = st.checkbox(
                     f"{model['name']}", 
-                    key=f"remove_{model['name']}",
+                    key=f"remove_{sanitize_key(model['name'])}",
                     help=help_text
                 )
             # Remove button for selected models
@@ -3700,7 +3709,7 @@ if st.session_state.results:
             st.selectbox(
                 "Accuracy",
                 options=["Select...", "Accurate", "Somewhat Accurate", "Not Accurate"],
-                key=f"rating_side_{model_name}"
+                key=f"rating_side_{sanitize_key(model_name)}"
             )
         else:
             for i in range(0, len(models_with_results), 2):
@@ -3720,7 +3729,7 @@ if st.session_state.results:
                     st.selectbox(
                         "Accuracy",
                         options=["Select...", "Accurate", "Somewhat Accurate", "Not Accurate"],
-                        key=f"rating_side_{model_name}"
+                        key=f"rating_side_{sanitize_key(model_name)}"
                     )
                 if i + 1 < len(models_with_results):
                     with row_cols[1]:
@@ -3738,7 +3747,7 @@ if st.session_state.results:
                         st.selectbox(
                             "Accuracy",
                             options=["Select...", "Accurate", "Somewhat Accurate", "Not Accurate"],
-                            key=f"rating_side_{model_name}"
+                            key=f"rating_side_{sanitize_key(model_name)}"
                         )
     
     with tab2:
@@ -3760,7 +3769,7 @@ if st.session_state.results:
                 st.selectbox(
                     "Accuracy",
                     options=["Select...", "Accurate", "Somewhat Accurate", "Not Accurate"],
-                    key=f"rating_stacked_{model}"
+                    key=f"rating_stacked_{sanitize_key(model)}"
                 )
 
     st.divider()
@@ -3770,9 +3779,9 @@ if st.session_state.results:
         # Collect ratings
         model_ratings = {}
         for model in st.session_state.results.keys():
-            # Check both possible keys
-            side_key = f"rating_side_{model}"
-            stacked_key = f"rating_stacked_{model}"
+            # Check both possible keys (using sanitized keys to match the widget keys)
+            side_key = f"rating_side_{sanitize_key(model)}"
+            stacked_key = f"rating_stacked_{sanitize_key(model)}"
             
             side_rating = st.session_state.get(side_key, "Select...")
             stacked_rating = st.session_state.get(stacked_key, "Select...")
