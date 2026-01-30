@@ -109,6 +109,13 @@ if 'parallel_validation_results' not in st.session_state:
 if 'parallel_prompt_reports' not in st.session_state:
     st.session_state.parallel_prompt_reports = {}  # Structure: {prompt_label: {'pdf': bytes, 'csv_df': df, 'agg_df': df}}
 
+# Auto-save settings
+if 'auto_save_reports' not in st.session_state:
+    st.session_state.auto_save_reports = True
+
+if 'reports_output_dir' not in st.session_state:
+    st.session_state.reports_output_dir = os.path.join(os.path.expanduser("~"), "LLM_Suite_Reports")
+
 # --- Performance Stats Data Class ---
 @dataclass
 class PerformanceStats:
@@ -1520,6 +1527,71 @@ def safe_filename(name: str) -> str:
     return sanitized or "testset"
 
 
+def auto_save_reports(reports: List[Dict], report_type: str = "testset") -> List[str]:
+    """Automatically save reports (CSV & PDF) to the configured output directory.
+    
+    Args:
+        reports: List of report dictionaries with 'name', 'csv', and 'pdf' keys
+        report_type: Type prefix for the report files (e.g., 'testset', 'parallel')
+    
+    Returns:
+        List of saved file paths
+    """
+    if not st.session_state.get('auto_save_reports', False):
+        return []
+    
+    output_dir = st.session_state.get('reports_output_dir', '')
+    if not output_dir:
+        return []
+    
+    # Create output directory if it doesn't exist
+    try:
+        os.makedirs(output_dir, exist_ok=True)
+    except Exception as e:
+        st.session_state.debug_info.append(f"Error creating output directory: {e}")
+        return []
+    
+    saved_files = []
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    
+    for idx, report in enumerate(reports, start=1):
+        report_name = report.get('name', f'{report_type}_{idx}')
+        safe_name = safe_filename(report_name)
+        base_filename = f"{report_type}_{safe_name}_{timestamp}"
+        
+        # Save CSV
+        csv_data = report.get('csv')
+        if csv_data:
+            csv_path = os.path.join(output_dir, f"{base_filename}.csv")
+            try:
+                with open(csv_path, 'w', encoding='utf-8') as f:
+                    f.write(csv_data)
+                saved_files.append(csv_path)
+                st.session_state.debug_info.append(f"Auto-saved CSV: {csv_path}")
+            except Exception as e:
+                st.session_state.debug_info.append(f"Error saving CSV {csv_path}: {e}")
+        
+        # Save PDF
+        pdf_data = report.get('pdf')
+        if pdf_data:
+            pdf_path = os.path.join(output_dir, f"{base_filename}.pdf")
+            try:
+                # Handle both string and bytes PDF data
+                if isinstance(pdf_data, str):
+                    pdf_bytes = pdf_data.encode('latin-1')
+                else:
+                    pdf_bytes = bytes(pdf_data)
+                
+                with open(pdf_path, 'wb') as f:
+                    f.write(pdf_bytes)
+                saved_files.append(pdf_path)
+                st.session_state.debug_info.append(f"Auto-saved PDF: {pdf_path}")
+            except Exception as e:
+                st.session_state.debug_info.append(f"Error saving PDF {pdf_path}: {e}")
+    
+    return saved_files
+
+
 def build_testset_report_assets(testset_results: List[Dict]) -> Dict[str, Any]:
     """Create aggregated CSV/PDF artifacts from testset run results."""
     if not testset_results:
@@ -2073,6 +2145,32 @@ with st.sidebar:
             value=st.session_state.get("evaluation_prompt_value", "Several LLMs have been queried with the same prompt. Following are their individual responses to the prompt. Please look over the responses as a whole, and determine which response(s) are the most recurring. DO NOT evaluate the prompt on your own, only find which the most common model response."),
             key="evaluation_prompt"
         )
+
+        # --- Auto-Save Settings ---
+        st.subheader("Auto-Save Reports")
+        auto_save_enabled = st.checkbox(
+            "Auto-save reports on completion",
+            value=st.session_state.get("auto_save_reports", True),
+            help="Automatically save CSV and PDF reports to disk when a run completes. Useful for overnight runs.",
+            key="auto_save_checkbox"
+        )
+        st.session_state.auto_save_reports = auto_save_enabled
+        
+        if auto_save_enabled:
+            default_dir = st.session_state.get('reports_output_dir', os.path.join(os.path.expanduser("~"), "LLM_Suite_Reports"))
+            output_dir = st.text_input(
+                "Output Directory",
+                value=default_dir,
+                help="Directory where reports will be automatically saved",
+                key="reports_output_dir_input"
+            )
+            st.session_state.reports_output_dir = output_dir
+            
+            # Show directory status
+            if os.path.exists(output_dir):
+                st.caption(f"✅ Directory exists")
+            else:
+                st.caption(f"📁 Directory will be created on first save")
 
         # --- Profile/Config Management ---
         st.markdown("### Config / Profile Management")
@@ -2700,6 +2798,20 @@ if parallel_compare_button:
                         st.session_state.debug_info.append(f"Error generating PDF for {prompt_label}: {e}")
                 
                 parallel_status.empty()
+            
+            # Auto-save parallel prompt reports
+            if st.session_state.parallel_prompt_reports:
+                parallel_reports = []
+                for prompt_label, assets in st.session_state.parallel_prompt_reports.items():
+                    csv_df = assets.get('csv_df')
+                    parallel_reports.append({
+                        'name': prompt_label,
+                        'csv': csv_df.to_csv(index=False) if csv_df is not None and not csv_df.empty else None,
+                        'pdf': assets.get('pdf')
+                    })
+                saved_files = auto_save_reports(parallel_reports, report_type="parallel")
+                if saved_files:
+                    st.info(f"📁 Auto-saved {len(saved_files)} report file(s) to {st.session_state.reports_output_dir}")
             
             st.success(f"Completed parallel comparison across {len(parallel_selected_models)} model(s)!")
 
@@ -3360,6 +3472,12 @@ if compare_button:
                 })
                 st.session_state.testset_batch_debug_logs.append({'name': ts_name, 'logs': consolidated_debug_info})
                 st.success(f"Completed {ts_name}")
+
+            # Auto-save all batch reports
+            if st.session_state.testset_batch_reports:
+                saved_files = auto_save_reports(st.session_state.testset_batch_reports, report_type="testset")
+                if saved_files:
+                    st.info(f"📁 Auto-saved {len(saved_files)} report file(s) to {st.session_state.reports_output_dir}")
 
             # Clear batch progress indicators
             batch_progress_bar.empty()
