@@ -14,6 +14,8 @@ import csv
 import copy
 import tempfile
 import concurrent.futures
+import threading
+from datetime import datetime
 from fpdf import FPDF
 try:
     from fpdf.enums import XPos, YPos
@@ -115,6 +117,13 @@ if 'auto_save_reports' not in st.session_state:
 
 if 'reports_output_dir' not in st.session_state:
     st.session_state.reports_output_dir = os.path.join(os.path.expanduser("~"), "LLM_Suite_Reports")
+
+# Persistent run state for recovery after WebSocket disconnections
+if 'current_run_id' not in st.session_state:
+    st.session_state.current_run_id = None
+
+if 'run_state_file' not in st.session_state:
+    st.session_state.run_state_file = None
 
 # --- Performance Stats Data Class ---
 @dataclass
@@ -1527,6 +1536,150 @@ def safe_filename(name: str) -> str:
     return sanitized or "testset"
 
 
+# --- Persistent Run State Management (for WebSocket disconnect recovery) ---
+_run_state_lock = threading.Lock()
+
+def get_run_state_dir() -> str:
+    """Get the directory for storing run state files."""
+    output_dir = st.session_state.get('reports_output_dir', os.path.join(os.path.expanduser("~"), "LLM_Suite_Reports"))
+    state_dir = os.path.join(output_dir, ".run_state")
+    os.makedirs(state_dir, exist_ok=True)
+    return state_dir
+
+
+def create_run_state(run_type: str = "testset") -> str:
+    """Create a new run state file and return the run ID."""
+    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    state_file = os.path.join(get_run_state_dir(), f"run_{run_id}.json")
+    
+    state = {
+        "run_id": run_id,
+        "run_type": run_type,
+        "started_at": datetime.now().isoformat(),
+        "status": "running",
+        "completed_reports": [],
+        "total_iterations": 0,
+        "completed_iterations": 0,
+        "last_update": datetime.now().isoformat()
+    }
+    
+    with _run_state_lock:
+        with open(state_file, 'w', encoding='utf-8') as f:
+            json.dump(state, f, indent=2)
+    
+    st.session_state.current_run_id = run_id
+    st.session_state.run_state_file = state_file
+    return run_id
+
+
+def update_run_state(updates: dict):
+    """Update the current run state file with new data."""
+    state_file = st.session_state.get('run_state_file')
+    if not state_file or not os.path.exists(state_file):
+        return
+    
+    with _run_state_lock:
+        try:
+            with open(state_file, 'r', encoding='utf-8') as f:
+                state = json.load(f)
+            
+            state.update(updates)
+            state["last_update"] = datetime.now().isoformat()
+            
+            with open(state_file, 'w', encoding='utf-8') as f:
+                json.dump(state, f, indent=2)
+        except Exception as e:
+            if 'debug_info' in st.session_state:
+                st.session_state.debug_info.append(f"Error updating run state: {e}")
+
+
+def complete_run_state(status: str = "completed"):
+    """Mark the current run as completed."""
+    update_run_state({
+        "status": status,
+        "completed_at": datetime.now().isoformat()
+    })
+    st.session_state.current_run_id = None
+    st.session_state.run_state_file = None
+
+
+def add_report_to_run_state(report_info: dict):
+    """Add a completed report to the run state."""
+    state_file = st.session_state.get('run_state_file')
+    if not state_file or not os.path.exists(state_file):
+        return
+    
+    with _run_state_lock:
+        try:
+            with open(state_file, 'r', encoding='utf-8') as f:
+                state = json.load(f)
+            
+            state["completed_reports"].append(report_info)
+            state["completed_iterations"] = len(state["completed_reports"])
+            state["last_update"] = datetime.now().isoformat()
+            
+            with open(state_file, 'w', encoding='utf-8') as f:
+                json.dump(state, f, indent=2)
+        except Exception as e:
+            if 'debug_info' in st.session_state:
+                st.session_state.debug_info.append(f"Error adding report to run state: {e}")
+
+
+def get_saved_reports_from_directory() -> List[Dict]:
+    """Scan the reports directory for previously saved reports."""
+    output_dir = st.session_state.get('reports_output_dir', '')
+    if not output_dir or not os.path.exists(output_dir):
+        return []
+    
+    reports = []
+    try:
+        # Group files by base name (without extension)
+        file_groups = {}
+        for filename in os.listdir(output_dir):
+            filepath = os.path.join(output_dir, filename)
+            if not os.path.isfile(filepath):
+                continue
+            
+            # Parse filename to extract info
+            base_name = os.path.splitext(filename)[0]
+            ext = os.path.splitext(filename)[1].lower()
+            
+            if ext not in ['.csv', '.pdf']:
+                continue
+            
+            if base_name not in file_groups:
+                file_groups[base_name] = {
+                    'name': base_name,
+                    'csv_path': None,
+                    'pdf_path': None,
+                    'modified': 0
+                }
+            
+            if ext == '.csv':
+                file_groups[base_name]['csv_path'] = filepath
+            elif ext == '.pdf':
+                file_groups[base_name]['pdf_path'] = filepath
+            
+            # Track most recent modification time
+            mtime = os.path.getmtime(filepath)
+            if mtime > file_groups[base_name]['modified']:
+                file_groups[base_name]['modified'] = mtime
+        
+        # Convert to list and sort by modification time (newest first)
+        reports = list(file_groups.values())
+        reports.sort(key=lambda x: x['modified'], reverse=True)
+        
+        # Add formatted date
+        for report in reports:
+            report['date'] = datetime.fromtimestamp(report['modified']).strftime("%Y-%m-%d %H:%M:%S")
+        
+    except Exception as e:
+        if 'debug_info' in st.session_state:
+            st.session_state.debug_info.append(f"Error scanning reports directory: {e}")
+    
+    return reports
+
+
 def auto_save_reports(reports: List[Dict], report_type: str = "testset") -> List[str]:
     """Automatically save reports (CSV & PDF) to the configured output directory.
     
@@ -1559,6 +1712,9 @@ def auto_save_reports(reports: List[Dict], report_type: str = "testset") -> List
         safe_name = safe_filename(report_name)
         base_filename = f"{report_type}_{safe_name}_{timestamp}"
         
+        csv_path = None
+        pdf_path = None
+        
         # Save CSV
         csv_data = report.get('csv')
         if csv_data:
@@ -1570,6 +1726,7 @@ def auto_save_reports(reports: List[Dict], report_type: str = "testset") -> List
                 st.session_state.debug_info.append(f"Auto-saved CSV: {csv_path}")
             except Exception as e:
                 st.session_state.debug_info.append(f"Error saving CSV {csv_path}: {e}")
+                csv_path = None
         
         # Save PDF
         pdf_data = report.get('pdf')
@@ -1588,6 +1745,16 @@ def auto_save_reports(reports: List[Dict], report_type: str = "testset") -> List
                 st.session_state.debug_info.append(f"Auto-saved PDF: {pdf_path}")
             except Exception as e:
                 st.session_state.debug_info.append(f"Error saving PDF {pdf_path}: {e}")
+                pdf_path = None
+        
+        # Update run state with saved report info (for recovery after disconnect)
+        if csv_path or pdf_path:
+            add_report_to_run_state({
+                "name": report_name,
+                "csv_path": csv_path,
+                "pdf_path": pdf_path,
+                "saved_at": datetime.now().isoformat()
+            })
     
     return saved_files
 
@@ -2171,6 +2338,66 @@ with st.sidebar:
                 st.caption(f"✅ Directory exists")
             else:
                 st.caption(f"📁 Directory will be created on first save")
+        
+        # --- Saved Reports Browser (for recovery after WebSocket disconnect) ---
+        st.subheader("📂 Saved Reports")
+        st.caption("Browse and download previously saved reports (useful after long runs or disconnections)")
+        
+        saved_reports = get_saved_reports_from_directory()
+        if saved_reports:
+            # Show count and allow refresh
+            col_info, col_refresh = st.columns([3, 1])
+            with col_info:
+                st.caption(f"Found {len(saved_reports)} report(s)")
+            with col_refresh:
+                if st.button("🔄", key="refresh_saved_reports", help="Refresh report list"):
+                    st.rerun()
+            
+            # Show the most recent reports (limit to 10 for UI performance)
+            for idx, report in enumerate(saved_reports[:10]):
+                with st.expander(f"📄 {report['name']}", expanded=False):
+                    st.caption(f"Saved: {report['date']}")
+                    
+                    col1, col2 = st.columns(2)
+                    
+                    # CSV download
+                    if report.get('csv_path') and os.path.exists(report['csv_path']):
+                        with col1:
+                            try:
+                                with open(report['csv_path'], 'r', encoding='utf-8') as f:
+                                    csv_content = f.read()
+                                st.download_button(
+                                    label="📊 CSV",
+                                    data=csv_content,
+                                    file_name=os.path.basename(report['csv_path']),
+                                    mime="text/csv",
+                                    key=f"saved_csv_{idx}",
+                                    width="stretch"
+                                )
+                            except Exception as e:
+                                st.error(f"Error reading CSV: {e}")
+                    
+                    # PDF download
+                    if report.get('pdf_path') and os.path.exists(report['pdf_path']):
+                        with col2:
+                            try:
+                                with open(report['pdf_path'], 'rb') as f:
+                                    pdf_content = f.read()
+                                st.download_button(
+                                    label="📄 PDF",
+                                    data=pdf_content,
+                                    file_name=os.path.basename(report['pdf_path']),
+                                    mime="application/pdf",
+                                    key=f"saved_pdf_{idx}",
+                                    width="stretch"
+                                )
+                            except Exception as e:
+                                st.error(f"Error reading PDF: {e}")
+            
+            if len(saved_reports) > 10:
+                st.caption(f"... and {len(saved_reports) - 10} more reports in {st.session_state.reports_output_dir}")
+        else:
+            st.caption("No saved reports found. Reports will appear here after runs complete.")
 
         # --- Profile/Config Management ---
         st.markdown("### Config / Profile Management")
@@ -2296,7 +2523,7 @@ if user_prompt:
                         st.info(f"{uploaded_file.name}: parsed {len(rows)} rows from testset")
                         if len(rows) > 0:
                             preview_df = pd.DataFrame(rows[:5])
-                            st.dataframe(preview_df, use_container_width=True)
+                            st.dataframe(preview_df, width="stretch")
                     except Exception as e:
                         st.error(f"Error parsing testset file {uploaded_file.name}: {e}")
             else:
@@ -2311,7 +2538,7 @@ if user_prompt:
         template_error = f"Error parsing prompt template: {str(e)}"
 
 # Compare Models button (standard comparison)
-compare_button = st.button("Compare Models", use_container_width=True)
+compare_button = st.button("Compare Models", width="stretch")
 
 if template_error:
     st.error(template_error)
@@ -2512,7 +2739,7 @@ if not use_individual_testsets:
                 # Show preview
                 preview_df = pd.DataFrame([{k: v for k, v in row.items() if not k.startswith('_')} 
                                            for row in parallel_testset_rows[:5]])
-                st.dataframe(preview_df, use_container_width=True)
+                st.dataframe(preview_df, width="stretch")
                 
                 # Check for expected responses
                 has_expected = any('_expected_responses' in row for row in parallel_testset_rows)
@@ -2544,7 +2771,7 @@ if parallel_prompt_vars and not parallel_testset_rows and not use_individual_tes
 # Button to run parallel prompts
 parallel_compare_button = st.button(
     "Run Parallel Comparison", 
-    use_container_width=True,
+    width="stretch",
     disabled=len(parallel_selected_models) == 0 or len(parallel_prompts_data) < 2,
     key="parallel_compare_btn"
 )
@@ -2603,6 +2830,15 @@ if parallel_compare_button:
             iterations = []
         
         if iterations:
+            # Initialize persistent run state for WebSocket disconnect recovery
+            run_id = create_run_state(run_type="parallel_comparison")
+            update_run_state({
+                "total_models": len(parallel_selected_models),
+                "total_prompts": len(parallel_prompts_data),
+                "total_iterations": len(iterations),
+                "selected_models": parallel_selected_models
+            })
+            
             total_operations = len(parallel_selected_models) * len(parallel_prompts_data) * len(iterations)
             st.session_state.debug_info.append(
                 f"Starting parallel comparison: {len(parallel_selected_models)} models × "
@@ -2813,6 +3049,9 @@ if parallel_compare_button:
                 if saved_files:
                     st.info(f"📁 Auto-saved {len(saved_files)} report file(s) to {st.session_state.reports_output_dir}")
             
+            # Mark run as complete
+            complete_run_state(status="completed")
+            
             st.success(f"Completed parallel comparison across {len(parallel_selected_models)} model(s)!")
 
 # Display parallel comparison results
@@ -2868,7 +3107,7 @@ if st.session_state.parallel_results_all or st.session_state.parallel_testset_re
         
         if summary_rows:
             summary_df = pd.DataFrame(summary_rows)
-            st.dataframe(summary_df, use_container_width=True, hide_index=True)
+            st.dataframe(summary_df, width="stretch", hide_index=True)
         
         # Detailed results in expander
         with st.expander("Detailed Iteration Results"):
@@ -2916,7 +3155,7 @@ if st.session_state.parallel_results_all or st.session_state.parallel_testset_re
                     data=csv_df.to_csv(index=False),
                     file_name="parallel_testset_results.csv",
                     mime="text/csv",
-                    use_container_width=True,
+                    width="stretch",
                     key="parallel_testset_csv_download"
                 )
             with col2:
@@ -2925,7 +3164,7 @@ if st.session_state.parallel_results_all or st.session_state.parallel_testset_re
                     data=json.dumps(st.session_state.parallel_testset_results, indent=2, default=str),
                     file_name="parallel_testset_results.json",
                     mime="application/json",
-                    use_container_width=True,
+                    width="stretch",
                     key="parallel_testset_json_download"
                 )
         
@@ -2948,7 +3187,7 @@ if st.session_state.parallel_results_all or st.session_state.parallel_testset_re
                                 data=assets['pdf'],
                                 file_name=f"parallel_{safe_name}_report.pdf",
                                 mime="application/pdf",
-                                use_container_width=True,
+                                width="stretch",
                                 key=f"parallel_pdf_{safe_name}"
                             )
                     
@@ -2961,7 +3200,7 @@ if st.session_state.parallel_results_all or st.session_state.parallel_testset_re
                                 data=csv_df.to_csv(index=False),
                                 file_name=f"parallel_{safe_name}_results.csv",
                                 mime="text/csv",
-                                use_container_width=True,
+                                width="stretch",
                                 key=f"parallel_csv_{safe_name}"
                             )
                     
@@ -2970,7 +3209,7 @@ if st.session_state.parallel_results_all or st.session_state.parallel_testset_re
                     if agg_df is not None and not agg_df.empty:
                         with col3:
                             st.caption("Summary Stats")
-                        st.dataframe(agg_df, use_container_width=True, hide_index=True)
+                        st.dataframe(agg_df, width="stretch", hide_index=True)
     
     else:
         # Single run results view (multiple models, single iteration)
@@ -2990,7 +3229,7 @@ if st.session_state.parallel_results_all or st.session_state.parallel_testset_re
                 
                 if stats_data:
                     parallel_stats_df = pd.DataFrame(stats_data)
-                    st.dataframe(parallel_stats_df, use_container_width=True, hide_index=True)
+                    st.dataframe(parallel_stats_df, width="stretch", hide_index=True)
             
             # Results display - organized by model
             for model_name, results in st.session_state.parallel_results_all.items():
@@ -3045,7 +3284,7 @@ if st.session_state.parallel_results_all or st.session_state.parallel_testset_re
                     data=parallel_results_df.to_csv(index=False),
                     file_name="parallel_prompt_comparison.csv",
                     mime="text/csv",
-                    use_container_width=True,
+                    width="stretch",
                     key="parallel_csv_download"
                 )
             
@@ -3071,7 +3310,7 @@ if st.session_state.parallel_results_all or st.session_state.parallel_testset_re
                     data=json.dumps(parallel_json_data, indent=2),
                     file_name="parallel_prompt_comparison.json",
                     mime="application/json",
-                    use_container_width=True,
+                    width="stretch",
                     key="parallel_json_download"
                 )
     
@@ -3232,7 +3471,7 @@ if compare_button:
         
         # Show stop button
         with stop_button_container:
-            if st.button("Stop Inference", type="primary", use_container_width=True):
+            if st.button("Stop Inference", type="primary", width="stretch"):
                 st.session_state.stop_inference = True
                 st.info("Stopping inference... please wait.")
                 st.rerun()
@@ -3247,6 +3486,14 @@ if compare_button:
         if testsets:
             st.session_state.testset_batch_reports = []
             st.session_state.testset_batch_debug_logs = []
+            
+            # Initialize persistent run state for WebSocket disconnect recovery
+            run_id = create_run_state(run_type="testset_batch")
+            update_run_state({
+                "total_testsets": len(testsets),
+                "selected_models": selected_models,
+                "total_iterations": sum(len(ts.get('rows', []) or []) for ts in testsets)
+            })
             
             # Calculate total operations across ALL test sets for batch progress tracking
             total_batch_ops = 0
@@ -3267,6 +3514,7 @@ if compare_button:
             for ts_idx, testset in enumerate(testsets, start=1):
                 if st.session_state.stop_inference:
                     st.session_state.debug_info.append("Testset run stopped by user")
+                    complete_run_state(status="stopped")
                     break
 
                 ts_name = testset.get('name') or f"Testset {ts_idx}"
@@ -3315,6 +3563,7 @@ if compare_button:
                     if st.session_state.stop_inference:
                         st.session_state.debug_info.append("Testset run stopped by user")
                         consolidated_debug_info.append("Testset run stopped by user")
+                        complete_run_state(status="stopped")
                         break
                     
                     consolidated_debug_info.append(f"=== Loading model: {model} ===")
@@ -3479,6 +3728,9 @@ if compare_button:
                 if saved_files:
                     st.info(f"📁 Auto-saved {len(saved_files)} report file(s) to {st.session_state.reports_output_dir}")
 
+            # Mark run as complete
+            complete_run_state(status="completed")
+            
             # Clear batch progress indicators
             batch_progress_bar.empty()
             batch_progress_container.empty()
@@ -3515,7 +3767,7 @@ if st.session_state.testset_batch_reports:
                     file_name=f"{safe_name}_results.csv",
                     mime="text/csv",
                     key=f"csv_{safe_name}_{idx}",
-                    use_container_width=True
+                    width="stretch"
                 )
         with col2:
             if report.get('pdf'):
@@ -3527,7 +3779,7 @@ if st.session_state.testset_batch_reports:
                     file_name=f"{safe_name}_report.pdf",
                     mime="application/pdf",
                     key=f"pdf_{safe_name}_{idx}",
-                    use_container_width=True
+                    width="stretch"
                 )
         st.divider()
 
@@ -3559,7 +3811,7 @@ if st.session_state.results:
                 # Display the stats table
                 st.dataframe(
                     stats_df,
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                     column_config={
                         "Model": st.column_config.TextColumn("Model", width="medium"),
@@ -3578,7 +3830,7 @@ if st.session_state.results:
                     data=stats_df.to_csv(index=False),
                     file_name="performance_statistics.csv",
                     mime="text/csv",
-                    use_container_width=True
+                    width="stretch"
                 )
                 
                 # Show performance comparison chart if multiple models
@@ -3603,7 +3855,7 @@ if st.session_state.results:
                         data=buf,
                         file_name="speed_comparison_chart.png",
                         mime="image/png",
-                        use_container_width=True
+                        width="stretch"
                     )
                     
                     plt.close(fig)  # Clean up
@@ -3624,7 +3876,7 @@ if st.session_state.results:
                         data=buf2,
                         file_name="time_comparison_chart.png",
                         mime="image/png",
-                        use_container_width=True
+                        width="stretch"
                     )
                     
                     plt.close(fig2)  # Clean up
@@ -3638,7 +3890,7 @@ if st.session_state.results:
     
     # Only show evaluate button if evaluation result is not present
     if not st.session_state.evaluation_result:
-        if st.button("Evaluate Responses", key="evaluate_button", use_container_width=True):
+        if st.button("Evaluate Responses", key="evaluate_button", width="stretch"):
             if evaluation_model:
                 with st.spinner(f"Evaluating responses using {evaluation_model}..."):
                     evaluation_result = evaluate_responses(
@@ -3668,7 +3920,7 @@ if st.session_state.results:
             data=results_df.to_csv(index=False),
             file_name="ollama_model_comparison.csv",
             mime="text/csv",
-            use_container_width=True
+            width="stretch"
         )
     
     # Prepare JSON data with accuracy ratings
@@ -3701,7 +3953,7 @@ if st.session_state.results:
             data=json_results,
             file_name="ollama_model_comparison.json",
             mime="application/json",
-            use_container_width=True
+            width="stretch"
         )
 
     # Generate PDF Report
@@ -3780,7 +4032,7 @@ if st.session_state.results:
                 data=pdf_data,
                 file_name="ollama_model_comparison.pdf",
                 mime="application/pdf",
-                use_container_width=True
+                width="stretch"
             )
     except Exception as e:
         st.error(f"Error generating PDF: {e}")
@@ -3791,14 +4043,14 @@ if st.session_state.results:
             st.markdown("### Testset Results Summary")
             agg_df = aggregate_testset_results_to_dataframe(testset_results)
             if not agg_df.empty:
-                st.dataframe(agg_df, use_container_width=True)
+                st.dataframe(agg_df, width="stretch")
                 csv_data = agg_df.to_csv(index=False)
                 st.download_button(
                     label="Download Testset Results as CSV",
                     data=csv_data,
                     file_name="testset_results.csv",
                     mime="text/csv",
-                    use_container_width=True
+                    width="stretch"
                 )
 
     # Tabs for different view modes
@@ -3965,6 +4217,6 @@ if st.session_state.results:
                     data=buf3,
                     file_name="accuracy_chart.png",
                     mime="image/png",
-                    use_container_width=True
+                    width="stretch"
                 )
                 plt.close(fig3)
